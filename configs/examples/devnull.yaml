@@ -1,0 +1,21 @@
+pipeline:
+  workers: 1
+  queue_size: 1000
+
+receivers:
+  otlp_grpc:
+    endpoint: "127.0.0.1:4317"
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+
+processors:
+  - type: validate
+  - type: batch
+    max_size: 256
+    timeout: 500ms
+
+exporters:
+  - type: devnull
+
+metrics:
+  endpoint: "127.0.0.1:8888"

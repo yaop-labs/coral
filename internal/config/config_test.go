@@ -1,0 +1,261 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+func validConfig() Config {
+	return Config{
+		Receivers: ReceiversConfig{
+			OTLPGRPC: &EndpointConfig{Endpoint: "127.0.0.1:4317"},
+		},
+		Exporters: []ExporterConfig{{Type: "devnull"}},
+	}
+}
+
+func TestDuration_UnmarshalYAML(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"30s", 30 * time.Second, false},
+		{"5m", 5 * time.Minute, false},
+		{"1h30m", 90 * time.Minute, false},
+		{"500ms", 500 * time.Millisecond, false},
+		{"garbage", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			type wrapper struct {
+				D Duration `yaml:"d"`
+			}
+			var w wrapper
+			err := yaml.Unmarshal([]byte("d: "+tt.input), &w)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error parsing %q", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse %q: %v", tt.input, err)
+			}
+			if got := w.D.Std(); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParse_Receivers(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_grpc:
+    endpoint: "0.0.0.0:4317"
+  jaeger_thrift_http:
+    endpoint: "0.0.0.0:14250"
+  zipkin_http:
+    endpoint: "0.0.0.0:9411"
+exporters:
+  - type: devnull
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Receivers.OTLPGRPC == nil || cfg.Receivers.OTLPGRPC.Endpoint != "0.0.0.0:4317" {
+		t.Errorf("otlp_grpc not parsed: %+v", cfg.Receivers.OTLPGRPC)
+	}
+	if cfg.Receivers.JaegerThriftHTTP == nil || cfg.Receivers.JaegerThriftHTTP.Endpoint != "0.0.0.0:14250" {
+		t.Errorf("jaeger_thrift_http not parsed: %+v", cfg.Receivers.JaegerThriftHTTP)
+	}
+	if cfg.Receivers.ZipkinHTTP == nil {
+		t.Errorf("zipkin_http not parsed")
+	}
+}
+
+func TestParse_Processors(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_grpc:
+    endpoint: "127.0.0.1:4317"
+processors:
+  - type: validate
+    max_span_bytes: 65536
+  - type: tail_sampling
+    decision_wait: 30s
+    max_traces: 100000
+    default_keep_rate: 0.1
+exporters:
+  - type: devnull
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Processors) != 2 {
+		t.Fatalf("expected 2 processors, got %d", len(cfg.Processors))
+	}
+	if cfg.Processors[0].Type != "validate" {
+		t.Errorf("processors[0].type = %q", cfg.Processors[0].Type)
+	}
+	if cfg.Processors[1].Type != "tail_sampling" {
+		t.Errorf("processors[1].type = %q", cfg.Processors[1].Type)
+	}
+}
+
+func TestParse_Exporters(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_grpc:
+    endpoint: "127.0.0.1:4317"
+exporters:
+  - type: amber
+    endpoint: "http://amber:8080"
+    timeout: 10s
+  - type: s3
+    bucket: "my-traces"
+    region: "us-east-1"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Exporters) != 2 {
+		t.Fatalf("expected 2 exporters, got %d", len(cfg.Exporters))
+	}
+	if cfg.Exporters[0].Type != "amber" {
+		t.Errorf("exporters[0].type = %q", cfg.Exporters[0].Type)
+	}
+}
+
+func TestParse_InvalidYAMLReturnsError(t *testing.T) {
+	_, err := Parse([]byte("this is: not: valid: yaml"))
+	if err == nil {
+		t.Fatalf("expected error on invalid yaml")
+	}
+}
+
+func TestLoad_File(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "collector.yaml")
+	doc := `
+pipeline:
+  workers: 4
+  queue_size: 5000
+receivers:
+  otlp_grpc:
+    endpoint: "127.0.0.1:4317"
+exporters:
+  - type: devnull
+`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Pipeline.Workers != 4 {
+		t.Fatalf("workers = %d, want 4", cfg.Pipeline.Workers)
+	}
+}
+
+func TestLoad_MissingFile(t *testing.T) {
+	_, err := Load("/no/such/path/collector.yaml")
+	if err == nil {
+		t.Fatalf("expected error for missing file")
+	}
+	if !strings.Contains(err.Error(), "read") {
+		t.Errorf("expected 'read' in error, got: %v", err)
+	}
+}
+
+func TestValidate_EmptyProcessorType(t *testing.T) {
+	cfg := validConfig()
+	cfg.Processors = []ProcessorConfig{{Type: ""}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty processor type")
+	}
+	if !strings.Contains(err.Error(), "type is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_EmptyExporterType(t *testing.T) {
+	cfg := validConfig()
+	cfg.Exporters = []ExporterConfig{{Type: ""}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty exporter type")
+	}
+	if !strings.Contains(err.Error(), "type is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestUDPConfig_Parsed(t *testing.T) {
+	doc := []byte(`
+receivers:
+  jaeger_thrift_udp:
+    endpoint: "0.0.0.0:6831"
+    max_packet_size: 65000
+exporters:
+  - type: devnull
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	udp := cfg.Receivers.JaegerThriftUDP
+	if udp == nil {
+		t.Fatal("jaeger_thrift_udp not parsed")
+	}
+	if udp.MaxPacketSize != 65000 {
+		t.Errorf("max_packet_size = %d, want 65000", udp.MaxPacketSize)
+	}
+}
+
+func TestValidate_NoReceivers(t *testing.T) {
+	cfg := validConfig()
+	cfg.Receivers = ReceiversConfig{}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error without receivers")
+	}
+	if !strings.Contains(err.Error(), "at least one receiver") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_NoExporters(t *testing.T) {
+	cfg := validConfig()
+	cfg.Exporters = nil
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error without exporters")
+	}
+	if !strings.Contains(err.Error(), "at least one exporter") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_HeadSamplingRemoved(t *testing.T) {
+	cfg := validConfig()
+	cfg.Processors = []ProcessorConfig{{Type: "head_sampling"}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for removed head_sampling")
+	}
+	if !strings.Contains(err.Error(), "head_sampling was removed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

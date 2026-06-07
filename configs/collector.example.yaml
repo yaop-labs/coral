@@ -1,0 +1,55 @@
+# Collector config example. The binary refuses to start without --config.
+
+pipeline:
+  workers: 0
+  queue_size: 10000
+
+receivers:
+  otlp_grpc:
+    endpoint: "0.0.0.0:4317"
+  otlp_http:
+    endpoint: "0.0.0.0:4318"
+  jaeger_thrift_udp:
+    endpoint: "0.0.0.0:6831"
+    max_packet_size: 65000
+  jaeger_thrift_tcp:
+    endpoint: "0.0.0.0:6832"
+  jaeger_thrift_http:
+    endpoint: "0.0.0.0:14268"
+  zipkin_http:
+    endpoint: "0.0.0.0:9411"
+
+processors:
+  - type: validate
+    max_span_bytes: 65536
+    creds_patterns:
+      - '(?i)password\s*[:=]\s*\S+'
+      - '[A-Za-z0-9_-]{40,}'
+  - type: attributes
+    actions:
+      - action: delete
+        key: "http.request.header.authorization"
+  - type: tail_sampling
+    decision_wait: 30s
+    max_traces: 100000
+    default_keep_rate: 0.1
+    rules:
+      - type: error
+      - type: debug_tag
+      - type: duration
+        threshold: 1s
+  - type: batch
+    max_size: 512
+    timeout: 1s
+
+exporters:
+  - type: amber
+    endpoint: "http://127.0.0.1:8080/v1/traces"
+    timeout: 5s
+    retry:
+      max_attempts: 3
+      initial_backoff: 100ms
+      max_backoff: 5s
+
+metrics:
+  endpoint: "0.0.0.0:8888"

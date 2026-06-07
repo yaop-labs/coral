@@ -1,0 +1,39 @@
+pipeline:
+  workers: 0
+  queue_size: 10000
+
+receivers:
+  jaeger_thrift_udp:
+    endpoint: "0.0.0.0:6831"
+  otlp_grpc:
+    endpoint: "0.0.0.0:4317"
+
+processors:
+  - type: validate
+  - type: attributes
+    actions:
+      - action: add
+        key: "collector"
+        value: "amber"
+  - type: tail_sampling
+    decision_wait: 30s
+    max_traces: 200000
+    default_keep_rate: 0.01
+    rules:
+      - type: error
+      - type: debug_tag
+      - type: duration
+        threshold: 2s
+      - type: service
+        services:
+          - "checkout"
+          - "payments"
+  - type: batch
+    max_size: 512
+    timeout: 1s
+
+exporters:
+  - type: devnull
+
+metrics:
+  endpoint: "127.0.0.1:8888"

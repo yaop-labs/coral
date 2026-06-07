@@ -1,0 +1,40 @@
+pipeline:
+  workers: 0
+  queue_size: 10000
+
+receivers:
+  otlp_grpc:
+    endpoint: "0.0.0.0:4317"
+  otlp_http:
+    endpoint: "0.0.0.0:4318"
+
+processors:
+  - type: validate
+    max_span_bytes: 65536
+  - type: attributes
+    actions:
+      - action: delete
+        key: "http.request.header.authorization"
+  - type: tail_sampling
+    decision_wait: 30s
+    max_traces: 100000
+    default_keep_rate: 0.1
+    rules:
+      - type: error
+      - type: duration
+        threshold: 1s
+  - type: batch
+    max_size: 512
+    timeout: 1s
+
+exporters:
+  - type: amber
+    endpoint: "http://amber:8080/v1/traces"
+    timeout: 5s
+    retry:
+      max_attempts: 3
+      initial_backoff: 100ms
+      max_backoff: 5s
+
+metrics:
+  endpoint: "0.0.0.0:8888"
