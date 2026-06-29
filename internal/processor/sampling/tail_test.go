@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 func traceSpan(traceID byte, spanID byte, status model.SpanStatus) model.Span {

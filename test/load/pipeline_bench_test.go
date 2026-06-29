@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
-	"github.com/hnlbs/collector/internal/pipeline"
-	"github.com/hnlbs/collector/internal/processor/sampling"
+	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/coral/internal/pipeline"
+	"github.com/yaop-labs/coral/internal/processor/sampling"
 )
 
 // devnullExporter discards all spans.

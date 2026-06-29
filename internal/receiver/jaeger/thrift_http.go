@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // ThriftHTTPReceiver accepts Jaeger spans over HTTP at POST /api/traces.

@@ -3,7 +3,7 @@ package pipeline
 import (
 	"context"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // Receiver generates Batches and pushes them into the pipeline via emit.

@@ -18,12 +18,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
-	"github.com/hnlbs/collector/internal/app"
-	"github.com/hnlbs/collector/internal/config"
-	"github.com/hnlbs/collector/internal/model"
-	"github.com/hnlbs/collector/internal/pipeline"
-	"github.com/hnlbs/collector/internal/processor/sampling"
-	otlprecv "github.com/hnlbs/collector/internal/receiver/otlp"
+	"github.com/yaop-labs/coral/internal/app"
+	"github.com/yaop-labs/coral/internal/config"
+	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/coral/internal/pipeline"
+	"github.com/yaop-labs/coral/internal/processor/sampling"
+	otlprecv "github.com/yaop-labs/coral/internal/receiver/otlp"
 )
 
 // capturingExporter collects all exported spans for assertions.

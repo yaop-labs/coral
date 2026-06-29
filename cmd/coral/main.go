@@ -1,4 +1,4 @@
-// Command collector is the entrypoint for the yaop-collector binary.
+// Command coral is the entrypoint for the yaop coral binary.
 package main
 
 import (
@@ -11,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hnlbs/collector/internal/app"
-	"github.com/hnlbs/collector/internal/config"
+	"github.com/yaop-labs/coral/internal/app"
+	"github.com/yaop-labs/coral/internal/config"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "collector:", err)
+		fmt.Fprintln(os.Stderr, "coral:", err)
 		os.Exit(1)
 	}
 }
@@ -29,7 +29,7 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	if *configPath == "" {
-		return fmt.Errorf("--config is required; refusing to start an unconfigured collector")
+		return fmt.Errorf("--config is required; refusing to start an unconfigured coral")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -49,7 +49,7 @@ func run() error {
 	if err := a.Start(ctx); err != nil {
 		return err
 	}
-	logger.Info("collector started")
+	logger.Info("coral started")
 
 	<-ctx.Done()
 	logger.Info("shutdown signal received")
@@ -60,6 +60,6 @@ func run() error {
 		logger.Error("shutdown error", "err", err)
 		return err
 	}
-	logger.Info("collector stopped")
+	logger.Info("coral stopped")
 	return nil
 }

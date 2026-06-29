@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 func TestValidateProcessor_SizeFilter(t *testing.T) {

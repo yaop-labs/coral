@@ -1,20 +1,27 @@
+// Package amber sends trace batches to amber over OTLP/HTTP at POST /v1/traces.
+//
+// Earlier this posted a bespoke JSON payload to /api/v1/batch, a route amber
+// does not serve; amber ingests traces only over OTLP. We now speak OTLP.
 package amber
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/yaop-labs/coral/internal/model"
 )
 
-// Exporter sends batches to the Amber HTTP API at POST /api/v1/batch.
+// Exporter posts OTLP trace requests to amber's /v1/traces endpoint.
 type Exporter struct {
-	endpoint string
-	client   *http.Client
+	url    string
+	client *http.Client
 }
 
 func New(endpoint string, timeout time.Duration) (*Exporter, error) {
@@ -24,81 +31,40 @@ func New(endpoint string, timeout time.Duration) (*Exporter, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &Exporter{
-		endpoint: endpoint,
-		client:   &http.Client{Timeout: timeout},
-	}, nil
+	url := strings.TrimRight(endpoint, "/")
+	if !strings.HasSuffix(url, "/v1/traces") {
+		url += "/v1/traces"
+	}
+	return &Exporter{url: url, client: &http.Client{Timeout: timeout}}, nil
 }
 
 func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
-	payload := toPayload(b)
-	body, err := json.Marshal(payload)
+	req := toTraceRequest(b)
+	if len(req.ResourceSpans) == 0 {
+		return nil
+	}
+	body, err := proto.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("amber: marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint+"/api/v1/batch", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("amber: request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/x-protobuf")
 
-	resp, err := e.client.Do(req)
+	resp, err := e.client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("amber: post: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("amber: unexpected status %d", resp.StatusCode)
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return fmt.Errorf("amber: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
 func (e *Exporter) Close() error { return nil }
-
-type payload struct {
-	Spans []spanPayload `json:"spans,omitempty"`
-}
-
-type spanPayload struct {
-	TraceID      string         `json:"trace_id"`
-	SpanID       string         `json:"span_id"`
-	ParentSpanID string         `json:"parent_span_id,omitempty"`
-	Service      string         `json:"service"`
-	Name         string         `json:"name"`
-	Kind         string         `json:"kind"`
-	StartUS      int64          `json:"start_us"`
-	DurationUS   int64          `json:"duration_us"`
-	Status       string         `json:"status"`
-	StatusMsg    string         `json:"status_msg,omitempty"`
-	Attrs        map[string]any `json:"attrs,omitempty"`
-}
-
-func toPayload(b model.Batch) payload {
-	spans := make([]spanPayload, 0, len(b.Spans))
-	for _, s := range b.Spans {
-		sp := spanPayload{
-			TraceID:    s.TraceID.String(),
-			SpanID:     s.SpanID.String(),
-			Service:    s.Resource.ServiceName(),
-			Name:       s.Name,
-			Kind:       s.Kind.String(),
-			StartUS:    s.StartTime.UnixMicro(),
-			DurationUS: s.Duration().Microseconds(),
-			Status:     s.Status.String(),
-			StatusMsg:  s.StatusMsg,
-		}
-		if !s.ParentSpanID.IsZero() {
-			sp.ParentSpanID = s.ParentSpanID.String()
-		}
-		if len(s.Attrs) > 0 {
-			sp.Attrs = make(map[string]any, len(s.Attrs))
-			for _, a := range s.Attrs {
-				sp.Attrs[a.Key] = a.Value.Interface()
-			}
-		}
-		spans = append(spans, sp)
-	}
-	return payload{Spans: spans}
-}

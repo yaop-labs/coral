@@ -109,6 +109,23 @@ exporters:
 	if cfg.Processors[1].Type != "tail_sampling" {
 		t.Errorf("processors[1].type = %q", cfg.Processors[1].Type)
 	}
+
+	// Regression guard: typed fields must decode from Raw. go-yaml's inline
+	// yaml.Node silently dropped these, so a ValidateConfig came back all-zero.
+	var vc ValidateConfig
+	if err := cfg.Processors[0].Raw.Decode(&vc); err != nil {
+		t.Fatal(err)
+	}
+	if vc.MaxSpanBytes != 65536 {
+		t.Errorf("validate.max_span_bytes = %d, want 65536 (Raw not captured?)", vc.MaxSpanBytes)
+	}
+	var ts TailSamplingConfig
+	if err := cfg.Processors[1].Raw.Decode(&ts); err != nil {
+		t.Fatal(err)
+	}
+	if ts.MaxTraces != 100000 {
+		t.Errorf("tail_sampling.max_traces = %d, want 100000", ts.MaxTraces)
+	}
 }
 
 func TestParse_Exporters(t *testing.T) {

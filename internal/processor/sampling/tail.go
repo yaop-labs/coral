@@ -8,7 +8,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 type decision uint8

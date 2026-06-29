@@ -53,3 +53,26 @@ exporters:
 
 metrics:
   endpoint: "0.0.0.0:8888"
+
+# Metrics pipeline (wisp → coral → amber), independent of the trace pipeline.
+# Receives OTLP metrics from agents, enriches resource attributes, forwards to
+# amber over OTLP/HTTP (amber ingests metrics over HTTP only).
+metric_pipeline:
+  receivers:
+    otlp_grpc:
+      endpoint: "0.0.0.0:4319"
+    otlp_http:
+      endpoint: "0.0.0.0:4320"
+  processors:
+    - type: attributes
+      actions:
+        - action: upsert
+          key: collector
+          value: coral
+  exporter:
+    endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/metrics
+    timeout: 5s
+    retry:
+      max_attempts: 3
+      initial_backoff: 100ms
+      max_backoff: 5s

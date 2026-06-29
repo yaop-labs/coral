@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // BatchProcessor accumulates spans and flushes when either maxSize is

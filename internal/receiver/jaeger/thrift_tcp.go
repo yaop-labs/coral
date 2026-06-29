@@ -8,7 +8,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // ThriftTCPReceiver accepts Jaeger spans over a TCP connection using the

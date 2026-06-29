@@ -32,6 +32,10 @@ type Config struct {
 	Processors []ProcessorConfig `yaml:"processors"`
 	Exporters  []ExporterConfig  `yaml:"exporters"`
 	Metrics    MetricsConfig     `yaml:"metrics"`
+
+	// MetricPipeline is the optional metrics path (wisp → coral → amber),
+	// independent of the trace pipeline above.
+	MetricPipeline *MetricPipelineConfig `yaml:"metric_pipeline"`
 }
 
 // PipelineConfig configures pipeline concurrency.
@@ -61,16 +65,44 @@ type UDPConfig struct {
 	MaxPacketSize int    `yaml:"max_packet_size"`
 }
 
-// ProcessorConfig stores a processor type and its raw YAML fields.
+// ProcessorConfig stores a processor type plus the full YAML node so each
+// processor decodes its own typed fields from Raw. A custom unmarshaler is
+// required: go-yaml v3 does NOT capture siblings into an inline yaml.Node, so
+// `Raw yaml.Node \`yaml:",inline"\“ silently decoded to nothing.
 type ProcessorConfig struct {
-	Type string    `yaml:"type"`
-	Raw  yaml.Node `yaml:",inline"`
+	Type string
+	Raw  yaml.Node
 }
 
-// ExporterConfig stores an exporter type and its raw YAML fields.
+func (pc *ProcessorConfig) UnmarshalYAML(node *yaml.Node) error {
+	pc.Raw = *node
+	var head struct {
+		Type string `yaml:"type"`
+	}
+	if err := node.Decode(&head); err != nil {
+		return err
+	}
+	pc.Type = head.Type
+	return nil
+}
+
+// ExporterConfig stores an exporter type plus the full YAML node (see
+// ProcessorConfig for why a custom unmarshaler is required).
 type ExporterConfig struct {
-	Type string    `yaml:"type"`
-	Raw  yaml.Node `yaml:",inline"`
+	Type string
+	Raw  yaml.Node
+}
+
+func (ec *ExporterConfig) UnmarshalYAML(node *yaml.Node) error {
+	ec.Raw = *node
+	var head struct {
+		Type string `yaml:"type"`
+	}
+	if err := node.Decode(&head); err != nil {
+		return err
+	}
+	ec.Type = head.Type
+	return nil
 }
 
 // ValidateConfig configures the validate processor.
@@ -136,9 +168,34 @@ type RetryConfig struct {
 	MaxBackoff     Duration `yaml:"max_backoff"`
 }
 
-// MetricsConfig configures the metrics HTTP endpoint.
+// MetricsConfig configures the collector's own /metrics (self-observability) endpoint.
 type MetricsConfig struct {
 	Endpoint string `yaml:"endpoint"`
+}
+
+// MetricPipelineConfig configures the metrics pipeline: OTLP receivers, enrich
+// processors, and an amber exporter.
+type MetricPipelineConfig struct {
+	Receivers  MetricReceiversConfig `yaml:"receivers"`
+	Processors []ProcessorConfig     `yaml:"processors"`
+	Exporter   MetricExporterConfig  `yaml:"exporter"`
+}
+
+// MetricReceiversConfig configures the OTLP metric receivers.
+type MetricReceiversConfig struct {
+	OTLPGRPC *EndpointConfig `yaml:"otlp_grpc"`
+	OTLPHTTP *EndpointConfig `yaml:"otlp_http"`
+}
+
+func (m MetricReceiversConfig) AnyEnabled() bool {
+	return m.OTLPGRPC != nil || m.OTLPHTTP != nil
+}
+
+// MetricExporterConfig configures the amber metrics exporter.
+type MetricExporterConfig struct {
+	Endpoint string      `yaml:"endpoint"`
+	Timeout  Duration    `yaml:"timeout"`
+	Retry    RetryConfig `yaml:"retry"`
 }
 
 func Load(path string) (Config, error) {
@@ -161,32 +218,60 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
-	if !c.Receivers.AnyEnabled() {
-		return fmt.Errorf("receivers: at least one receiver is required")
+	traceEnabled := c.Receivers.AnyEnabled()
+	if !traceEnabled && c.MetricPipeline == nil {
+		return fmt.Errorf("at least one receiver is required: enable a trace receiver or metric_pipeline")
 	}
-	for i, pc := range c.Processors {
+
+	if traceEnabled {
+		for i, pc := range c.Processors {
+			if pc.Type == "" {
+				return fmt.Errorf("processors[%d]: type is required", i)
+			}
+			switch pc.Type {
+			case "validate", "attributes", "batch", "tail_sampling":
+			case "head_sampling":
+				return fmt.Errorf("processors[%d]: head_sampling was removed; use tail_sampling", i)
+			default:
+				return fmt.Errorf("processors[%d]: unknown type %q", i, pc.Type)
+			}
+		}
+		if len(c.Exporters) == 0 {
+			return fmt.Errorf("exporters: at least one exporter is required")
+		}
+		for i, ec := range c.Exporters {
+			if ec.Type == "" {
+				return fmt.Errorf("exporters[%d]: type is required", i)
+			}
+			switch ec.Type {
+			case "devnull", "amber", "s3":
+			default:
+				return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
+			}
+		}
+	}
+
+	if c.MetricPipeline != nil {
+		if err := c.MetricPipeline.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *MetricPipelineConfig) validate() error {
+	if !m.Receivers.AnyEnabled() {
+		return fmt.Errorf("metric_pipeline.receivers: at least one OTLP receiver is required")
+	}
+	if m.Exporter.Endpoint == "" {
+		return fmt.Errorf("metric_pipeline.exporter.endpoint is required")
+	}
+	for i, pc := range m.Processors {
 		if pc.Type == "" {
-			return fmt.Errorf("processors[%d]: type is required", i)
+			return fmt.Errorf("metric_pipeline.processors[%d]: type is required", i)
 		}
-		switch pc.Type {
-		case "validate", "attributes", "batch", "tail_sampling":
-		case "head_sampling":
-			return fmt.Errorf("processors[%d]: head_sampling was removed; use tail_sampling", i)
-		default:
-			return fmt.Errorf("processors[%d]: unknown type %q", i, pc.Type)
-		}
-	}
-	if len(c.Exporters) == 0 {
-		return fmt.Errorf("exporters: at least one exporter is required")
-	}
-	for i, ec := range c.Exporters {
-		if ec.Type == "" {
-			return fmt.Errorf("exporters[%d]: type is required", i)
-		}
-		switch ec.Type {
-		case "devnull", "amber", "s3":
-		default:
-			return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
+		if pc.Type != "attributes" {
+			return fmt.Errorf("metric_pipeline.processors[%d]: unknown type %q", i, pc.Type)
 		}
 	}
 	return nil

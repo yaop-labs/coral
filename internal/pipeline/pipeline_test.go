@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // fakeReceiver sends batches on demand via Send.

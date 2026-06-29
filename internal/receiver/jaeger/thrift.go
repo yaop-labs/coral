@@ -9,7 +9,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // Thrift type codes.

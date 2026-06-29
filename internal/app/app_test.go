@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnlbs/collector/internal/config"
+	"github.com/yaop-labs/coral/internal/config"
 )
 
 func testConfig() config.Config {

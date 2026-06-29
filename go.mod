@@ -1,4 +1,4 @@
-module github.com/hnlbs/collector
+module github.com/yaop-labs/coral
 
 go 1.26.3
 

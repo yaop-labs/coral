@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // zipkinSpan is the Zipkin v2 JSON wire format.

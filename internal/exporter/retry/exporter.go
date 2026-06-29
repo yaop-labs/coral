@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
-	"github.com/hnlbs/collector/internal/pipeline"
+	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/coral/internal/pipeline"
 )
 
 type Config struct {

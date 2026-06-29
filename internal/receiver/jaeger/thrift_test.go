@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // buildBatch encodes a minimal Jaeger Batch in Thrift binary format.

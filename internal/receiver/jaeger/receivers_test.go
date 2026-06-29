@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // collectEmit collects batches from emit calls into a slice.

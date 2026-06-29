@@ -8,24 +8,27 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/hnlbs/collector/internal/config"
-	amberexp "github.com/hnlbs/collector/internal/exporter/amber"
-	"github.com/hnlbs/collector/internal/exporter/devnull"
-	retryexp "github.com/hnlbs/collector/internal/exporter/retry"
-	s3exp "github.com/hnlbs/collector/internal/exporter/s3"
-	"github.com/hnlbs/collector/internal/model"
-	"github.com/hnlbs/collector/internal/pipeline"
-	"github.com/hnlbs/collector/internal/processor"
-	"github.com/hnlbs/collector/internal/processor/sampling"
-	jaegerrecv "github.com/hnlbs/collector/internal/receiver/jaeger"
-	otlprecv "github.com/hnlbs/collector/internal/receiver/otlp"
-	zipkinrecv "github.com/hnlbs/collector/internal/receiver/zipkin"
+	"github.com/yaop-labs/coral/internal/config"
+	amberexp "github.com/yaop-labs/coral/internal/exporter/amber"
+	"github.com/yaop-labs/coral/internal/exporter/devnull"
+	retryexp "github.com/yaop-labs/coral/internal/exporter/retry"
+	s3exp "github.com/yaop-labs/coral/internal/exporter/s3"
+	"github.com/yaop-labs/coral/internal/metric"
+	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/coral/internal/pipeline"
+	"github.com/yaop-labs/coral/internal/processor"
+	"github.com/yaop-labs/coral/internal/processor/sampling"
+	jaegerrecv "github.com/yaop-labs/coral/internal/receiver/jaeger"
+	otlprecv "github.com/yaop-labs/coral/internal/receiver/otlp"
+	zipkinrecv "github.com/yaop-labs/coral/internal/receiver/zipkin"
 )
 
 // App is a fully wired but unstarted collector.
 type App struct {
 	logger   *slog.Logger
 	pipeline *pipeline.Pipeline
+
+	metricPipeline *metric.Pipeline // nil unless metric_pipeline is configured
 
 	otlpHTTP   *otlprecv.HTTPReceiver
 	otlpGRPC   *otlprecv.GRPCReceiver
@@ -85,7 +88,57 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		}
 	}
 
+	if cfg.MetricPipeline != nil {
+		mp, err := buildMetricPipeline(*cfg.MetricPipeline, cfg.Pipeline, logger)
+		if err != nil {
+			return nil, fmt.Errorf("metric_pipeline: %w", err)
+		}
+		a.metricPipeline = mp
+		logger.Info("metric pipeline enabled")
+	}
+
 	return a, nil
+}
+
+func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*metric.Pipeline, error) {
+	mp := metric.NewPipeline(base.Workers, base.QueueSize, logger)
+
+	grpcAddr, httpAddr := "", ""
+	if cfg.Receivers.OTLPGRPC != nil {
+		grpcAddr = cfg.Receivers.OTLPGRPC.Endpoint
+	}
+	if cfg.Receivers.OTLPHTTP != nil {
+		httpAddr = cfg.Receivers.OTLPHTTP.Endpoint
+	}
+	mp.AddReceiver(metric.NewOTLPReceiver(grpcAddr, httpAddr, logger))
+
+	for i, pc := range cfg.Processors {
+		switch pc.Type {
+		case "attributes":
+			var ac config.AttributesConfig
+			if err := pc.Raw.Decode(&ac); err != nil {
+				return nil, fmt.Errorf("processor %d (attributes): %w", i, err)
+			}
+			actions := make([]metric.AttributeAction, len(ac.Actions))
+			for j, a := range ac.Actions {
+				actions[j] = metric.AttributeAction{Action: a.Action, Key: a.Key, Value: a.Value}
+			}
+			mp.AddProcessor(metric.NewAttributesProcessor(actions))
+		default:
+			return nil, fmt.Errorf("processor %d: unknown type %q", i, pc.Type)
+		}
+	}
+
+	exp, err := metric.NewAmberExporter(cfg.Exporter.Endpoint, cfg.Exporter.Timeout.Std(), metric.RetryPolicy{
+		MaxAttempts:    cfg.Exporter.Retry.MaxAttempts,
+		InitialBackoff: cfg.Exporter.Retry.InitialBackoff.Std(),
+		MaxBackoff:     cfg.Exporter.Retry.MaxBackoff.Std(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	mp.AddExporter(exp)
+	return mp, nil
 }
 
 // OTLPHTTPAddr returns the bound address of the OTLP HTTP receiver (for tests).
@@ -110,11 +163,21 @@ func (a *App) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if a.metricPipeline != nil {
+		if err := a.metricPipeline.Start(ctx); err != nil {
+			return err
+		}
+	}
 	return a.pipeline.Start(ctx)
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
 	err := a.pipeline.Shutdown(ctx)
+	if a.metricPipeline != nil {
+		if mErr := a.metricPipeline.Shutdown(ctx); mErr != nil && err == nil {
+			err = mErr
+		}
+	}
 	for i := len(a.stopHooks) - 1; i >= 0; i-- {
 		if stopErr := a.stopHooks[i](ctx); stopErr != nil {
 			a.logger.Error("app stop hook error", "err", stopErr)

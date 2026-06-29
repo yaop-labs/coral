@@ -4,7 +4,7 @@ import (
 	"context"
 	"regexp"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // ValidateProcessor drops spans that exceed a size limit or contain

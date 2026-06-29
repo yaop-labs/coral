@@ -9,7 +9,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 // HTTPReceiver accepts Zipkin v2 spans at POST /api/v2/spans.

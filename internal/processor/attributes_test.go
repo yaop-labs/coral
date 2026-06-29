@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hnlbs/collector/internal/model"
+	"github.com/yaop-labs/coral/internal/model"
 )
 
 func span(attrs ...model.Attribute) model.Span {
