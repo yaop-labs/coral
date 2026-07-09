@@ -119,7 +119,7 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	}
 }
 
-func TestCROSMetricExporterExport(t *testing.T) {
+func TestFathomMetricExporterExport(t *testing.T) {
 	var gotPath string
 	var got *colmetricspb.ExportMetricsServiceRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,9 +132,9 @@ func TestCROSMetricExporterExport(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exp, err := NewCROSExporter(server.URL, time.Second, RetryPolicy{})
+	exp, err := NewFathomExporter(server.URL, time.Second, RetryPolicy{})
 	if err != nil {
-		t.Fatalf("new cros exporter: %v", err)
+		t.Fatalf("new fathom exporter: %v", err)
 	}
 	err = exp.Export(context.Background(), Batch{ResourceMetrics: []*metricspb.ResourceMetrics{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "app")}},

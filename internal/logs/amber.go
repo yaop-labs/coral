@@ -14,7 +14,7 @@ import (
 
 // AmberExporter posts OTLP log requests to amber's /v1/logs endpoint. amber is
 // the platform source of truth; logs must reach it (contract §1), so this runs
-// alongside the CROS fan-out rather than instead of it.
+// alongside the fathom fan-out rather than instead of it.
 type AmberExporter struct {
 	url    string
 	client *http.Client

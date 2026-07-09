@@ -137,8 +137,8 @@ exporters:
   - type: amber
     endpoint: "http://amber:8080"
     timeout: 10s
-  - type: cros
-    endpoint: "http://cros:8099"
+  - type: fathom
+    endpoint: "http://fathom:8099"
     timeout: 5s
   - type: s3
     bucket: "my-traces"
@@ -165,8 +165,8 @@ metric_pipeline:
   exporters:
     - type: amber
       endpoint: "http://amber:8080"
-    - type: cros
-      endpoint: "http://cros:8099"
+    - type: fathom
+      endpoint: "http://fathom:8099"
 `)
 	cfg, err := Parse(doc)
 	if err != nil {
@@ -178,8 +178,8 @@ metric_pipeline:
 	if len(cfg.MetricPipeline.Exporters) != 2 {
 		t.Fatalf("expected 2 metric exporters, got %d", len(cfg.MetricPipeline.Exporters))
 	}
-	if cfg.MetricPipeline.Exporters[1].Type != "cros" {
-		t.Fatalf("expected cros metric exporter, got %+v", cfg.MetricPipeline.Exporters[1])
+	if cfg.MetricPipeline.Exporters[1].Type != "fathom" {
+		t.Fatalf("expected fathom metric exporter, got %+v", cfg.MetricPipeline.Exporters[1])
 	}
 }
 
@@ -190,8 +190,8 @@ log_pipeline:
     otlp_http:
       endpoint: "127.0.0.1:4321"
   exporters:
-    - type: cros
-      endpoint: "http://cros:8099"
+    - type: fathom
+      endpoint: "http://fathom:8099"
 `)
 	cfg, err := Parse(doc)
 	if err != nil {
@@ -203,8 +203,8 @@ log_pipeline:
 	if len(cfg.LogPipeline.Exporters) != 1 {
 		t.Fatalf("expected 1 log exporter, got %d", len(cfg.LogPipeline.Exporters))
 	}
-	if cfg.LogPipeline.Exporters[0].Type != "cros" {
-		t.Fatalf("expected cros log exporter, got %+v", cfg.LogPipeline.Exporters[0])
+	if cfg.LogPipeline.Exporters[0].Type != "fathom" {
+		t.Fatalf("expected fathom log exporter, got %+v", cfg.LogPipeline.Exporters[0])
 	}
 }
 

@@ -50,9 +50,9 @@ exporters:
       max_attempts: 3
       initial_backoff: 100ms
       max_backoff: 5s
-  # Optional incident-context fan-out. Amber remains durable storage; CROS
+  # Optional incident-context fan-out. Amber remains durable storage; fathom
   # stores explain indexes and RCA bundles.
-  - type: cros
+  - type: fathom
     endpoint: "http://127.0.0.1:8099/v1/traces"
     timeout: 5s
     retry:
@@ -86,15 +86,15 @@ metric_pipeline:
         max_attempts: 3
         initial_backoff: 100ms
         max_backoff: 5s
-    - type: cros
-      endpoint: "http://127.0.0.1:8099" # CROS OTLP/HTTP /v1/metrics
+    - type: fathom
+      endpoint: "http://127.0.0.1:8099" # fathom OTLP/HTTP /v1/metrics
       timeout: 5s
       retry:
         max_attempts: 3
         initial_backoff: 100ms
         max_backoff: 5s
 
-# Logs pipeline. Amber is the source of truth and must receive logs; CROS is an
+# Logs pipeline. Amber is the source of truth and must receive logs; fathom is an
 # additional incident-context fan-out.
 log_pipeline:
   receivers:
@@ -110,8 +110,8 @@ log_pipeline:
         max_attempts: 3
         initial_backoff: 100ms
         max_backoff: 5s
-    - type: cros
-      endpoint: "http://127.0.0.1:8099" # CROS OTLP/HTTP /v1/logs
+    - type: fathom
+      endpoint: "http://127.0.0.1:8099" # fathom OTLP/HTTP /v1/logs
       timeout: 5s
       retry:
         max_attempts: 3

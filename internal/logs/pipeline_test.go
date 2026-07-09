@@ -26,7 +26,7 @@ func TestLogPipelineEndToEnd(t *testing.T) {
 	var mu sync.Mutex
 	var got *collogspb.ExportLogsServiceRequest
 	var gotPath string
-	cros := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fathom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		req := &collogspb.ExportLogsServiceRequest{}
 		_ = proto.Unmarshal(body, req)
@@ -35,10 +35,10 @@ func TestLogPipelineEndToEnd(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer cros.Close()
+	defer fathom.Close()
 
 	recv := NewOTLPReceiver("127.0.0.1:0", "", logger)
-	exp, err := NewCROSExporter(cros.URL, 2*time.Second, RetryPolicy{})
+	exp, err := NewFathomExporter(fathom.URL, 2*time.Second, RetryPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestLogPipelineEndToEnd(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if got == nil {
-		t.Fatal("fake cros received nothing")
+		t.Fatal("fake fathom received nothing")
 	}
 	if gotPath != "/v1/logs" {
 		t.Errorf("path = %q, want /v1/logs", gotPath)
@@ -102,7 +102,7 @@ func TestLogPipelineEndToEnd(t *testing.T) {
 	}
 }
 
-func TestCROSLogExporterExport(t *testing.T) {
+func TestFathomLogExporterExport(t *testing.T) {
 	var gotPath string
 	var got *collogspb.ExportLogsServiceRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,9 +115,9 @@ func TestCROSLogExporterExport(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exp, err := NewCROSExporter(server.URL, time.Second, RetryPolicy{})
+	exp, err := NewFathomExporter(server.URL, time.Second, RetryPolicy{})
 	if err != nil {
-		t.Fatalf("new cros exporter: %v", err)
+		t.Fatalf("new fathom exporter: %v", err)
 	}
 	err = exp.Export(context.Background(), Batch{ResourceLogs: []*logspb.ResourceLogs{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "checkout")}},

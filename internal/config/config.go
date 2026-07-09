@@ -249,7 +249,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("exporters[%d]: type is required", i)
 			}
 			switch ec.Type {
-			case "devnull", "amber", "cros", "s3":
+			case "devnull", "amber", "fathom", "s3":
 			default:
 				return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
 			}
@@ -282,7 +282,7 @@ func (m *MetricPipelineConfig) validate() error {
 			return fmt.Errorf("metric_pipeline.exporters[%d].endpoint is required", i)
 		}
 		switch exporter.metricType() {
-		case "amber", "cros":
+		case "amber", "fathom":
 		default:
 			return fmt.Errorf("metric_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
 		}
@@ -353,7 +353,7 @@ func (l *LogPipelineConfig) validate() error {
 			return fmt.Errorf("log_pipeline.exporters[%d].endpoint is required", i)
 		}
 		switch exporter.logType() {
-		case "amber", "cros":
+		case "amber", "fathom":
 		default:
 			return fmt.Errorf("log_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
 		}

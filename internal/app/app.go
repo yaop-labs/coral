@@ -10,8 +10,8 @@ import (
 
 	"github.com/yaop-labs/coral/internal/config"
 	amberexp "github.com/yaop-labs/coral/internal/exporter/amber"
-	crosexp "github.com/yaop-labs/coral/internal/exporter/cros"
 	"github.com/yaop-labs/coral/internal/exporter/devnull"
+	fathomexp "github.com/yaop-labs/coral/internal/exporter/fathom"
 	retryexp "github.com/yaop-labs/coral/internal/exporter/retry"
 	s3exp "github.com/yaop-labs/coral/internal/exporter/s3"
 	"github.com/yaop-labs/coral/internal/logs"
@@ -169,8 +169,8 @@ func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, erro
 	switch cfg.Type {
 	case "", "amber":
 		return metric.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
-	case "cros":
-		return metric.NewCROSExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+	case "fathom":
+		return metric.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
 	default:
 		return nil, fmt.Errorf("metric exporter: unknown type %q", cfg.Type)
 	}
@@ -217,8 +217,8 @@ func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
 	switch cfg.Type {
 	case "", "amber":
 		return logs.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
-	case "cros":
-		return logs.NewCROSExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+	case "fathom":
+		return logs.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
 	default:
 		return nil, fmt.Errorf("log exporter: unknown type %q", cfg.Type)
 	}
@@ -476,12 +476,12 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter, error) 
 			MaxBackoff:     cfg.Retry.MaxBackoff.Std(),
 		}), nil
 
-	case "cros":
+	case "fathom":
 		var cfg config.AmberConfig
 		if err := ec.Raw.Decode(&cfg); err != nil {
 			return nil, err
 		}
-		e, err := crosexp.New(cfg.Endpoint, cfg.Timeout.Std())
+		e, err := fathomexp.New(cfg.Endpoint, cfg.Timeout.Std())
 		if err != nil {
 			return nil, err
 		}

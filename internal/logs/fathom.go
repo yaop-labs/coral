@@ -20,16 +20,16 @@ import (
 // the backoff package so every signal retries identically (contract §4).
 type RetryPolicy = backoff.Policy
 
-// CROSExporter posts OTLP log requests to CROS's /v1/logs endpoint.
-type CROSExporter struct {
+// FathomExporter posts OTLP log requests to fathom's /v1/logs endpoint.
+type FathomExporter struct {
 	url    string
 	client *http.Client
 	retry  RetryPolicy
 }
 
-func NewCROSExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*CROSExporter, error) {
+func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*FathomExporter, error) {
 	if endpoint == "" {
-		return nil, fmt.Errorf("cros log exporter: endpoint required")
+		return nil, fmt.Errorf("fathom log exporter: endpoint required")
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -38,24 +38,24 @@ func NewCROSExporter(endpoint string, timeout time.Duration, retry RetryPolicy) 
 	if !strings.HasSuffix(url, "/v1/logs") {
 		url += "/v1/logs"
 	}
-	return &CROSExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
+	return &FathomExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
 }
 
-func (e *CROSExporter) Export(ctx context.Context, b Batch) error {
+func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
 	if b.Empty() {
 		return nil
 	}
 	req := &collogspb.ExportLogsServiceRequest{ResourceLogs: b.ResourceLogs}
 	body, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("cros logs: marshal: %w", err)
+		return fmt.Errorf("fathom logs: marshal: %w", err)
 	}
 	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "cros logs", body)
+		return post(ctx, e.client, e.url, "fathom logs", body)
 	})
 }
 
-func (e *CROSExporter) Close() error { return nil }
+func (e *FathomExporter) Close() error { return nil }
 
 // post sends one OTLP/protobuf log request and classifies the outcome per §4.
 func post(ctx context.Context, client *http.Client, url, who string, body []byte) error {

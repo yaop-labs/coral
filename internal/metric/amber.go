@@ -58,16 +58,16 @@ func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
 
 func (e *AmberExporter) Close() error { return nil }
 
-// CROSExporter posts OTLP metric requests to CROS's /v1/metrics endpoint.
-type CROSExporter struct {
+// FathomExporter posts OTLP metric requests to fathom's /v1/metrics endpoint.
+type FathomExporter struct {
 	url    string
 	client *http.Client
 	retry  RetryPolicy
 }
 
-func NewCROSExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*CROSExporter, error) {
+func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*FathomExporter, error) {
 	if endpoint == "" {
-		return nil, fmt.Errorf("cros metric exporter: endpoint required")
+		return nil, fmt.Errorf("fathom metric exporter: endpoint required")
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -76,24 +76,24 @@ func NewCROSExporter(endpoint string, timeout time.Duration, retry RetryPolicy) 
 	if !strings.HasSuffix(url, "/v1/metrics") {
 		url += "/v1/metrics"
 	}
-	return &CROSExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
+	return &FathomExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
 }
 
-func (e *CROSExporter) Export(ctx context.Context, b Batch) error {
+func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
 	if b.Empty() {
 		return nil
 	}
 	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: b.ResourceMetrics}
 	body, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("cros metrics: marshal: %w", err)
+		return fmt.Errorf("fathom metrics: marshal: %w", err)
 	}
 	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "cros metrics", body)
+		return post(ctx, e.client, e.url, "fathom metrics", body)
 	})
 }
 
-func (e *CROSExporter) Close() error { return nil }
+func (e *FathomExporter) Close() error { return nil }
 
 // post sends one OTLP/protobuf request and classifies the outcome per §4.
 func post(ctx context.Context, client *http.Client, url, who string, body []byte) error {
