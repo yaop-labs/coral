@@ -3,7 +3,6 @@ package otlp
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/coral/internal/otlphttp"
 )
 
 // HTTPReceiver accepts OTLP traces over HTTP/protobuf at /v1/traces.
@@ -88,23 +88,16 @@ func (r *HTTPReceiver) Addr() string {
 
 func (r *HTTPReceiver) handleTraces(w http.ResponseWriter, req *http.Request) {
 	r.requests.Add(1)
-	if req.Method != http.MethodPost {
+	body, enc, ok := otlphttp.ReadBody(w, req, 16<<20)
+	if !ok {
 		r.errs.Add(1)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 16<<20))
-	if err != nil {
-		r.errs.Add(1)
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	var pb coltracepb.ExportTraceServiceRequest
-	if err := proto.Unmarshal(body, &pb); err != nil {
+	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
 		r.errs.Add(1)
-		http.Error(w, "bad protobuf: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 

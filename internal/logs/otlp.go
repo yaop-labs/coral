@@ -2,7 +2,6 @@ package logs
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+
+	"github.com/yaop-labs/coral/internal/otlphttp"
 )
 
 const maxBodyBytes = 16 << 20
@@ -106,18 +107,13 @@ func (s *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 }
 
 func (r *OTLPReceiver) handleHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, maxBodyBytes))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	body, enc, ok := otlphttp.ReadBody(w, req, maxBodyBytes)
+	if !ok {
 		return
 	}
 	var pb collogspb.ExportLogsServiceRequest
-	if err := proto.Unmarshal(body, &pb); err != nil {
-		http.Error(w, "bad protobuf: "+err.Error(), http.StatusBadRequest)
+	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
+		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := r.ingest(req.Context(), &pb); err != nil {
