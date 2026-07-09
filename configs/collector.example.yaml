@@ -50,6 +50,15 @@ exporters:
       max_attempts: 3
       initial_backoff: 100ms
       max_backoff: 5s
+  # Optional incident-context fan-out. Amber remains durable storage; CROS
+  # stores explain indexes and RCA bundles.
+  - type: cros
+    endpoint: "http://127.0.0.1:8099/v1/traces"
+    timeout: 5s
+    retry:
+      max_attempts: 3
+      initial_backoff: 100ms
+      max_backoff: 5s
 
 metrics:
   endpoint: "0.0.0.0:8888"
@@ -69,10 +78,36 @@ metric_pipeline:
         - action: upsert
           key: collector
           value: coral
-  exporter:
-    endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/metrics
-    timeout: 5s
-    retry:
-      max_attempts: 3
-      initial_backoff: 100ms
-      max_backoff: 5s
+  exporters:
+    - type: amber
+      endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/metrics
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s
+    - type: cros
+      endpoint: "http://127.0.0.1:8099" # CROS OTLP/HTTP /v1/metrics
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s
+
+# Logs pipeline for incident-context fan-out. CROS already accepts OTLP logs;
+# Amber log storage can stay on its own path until Amber exposes a matching
+# OTLP log ingest route.
+log_pipeline:
+  receivers:
+    otlp_grpc:
+      endpoint: "0.0.0.0:4321"
+    otlp_http:
+      endpoint: "0.0.0.0:4322"
+  exporters:
+    - type: cros
+      endpoint: "http://127.0.0.1:8099" # CROS OTLP/HTTP /v1/logs
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s

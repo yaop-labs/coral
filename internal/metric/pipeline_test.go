@@ -118,3 +118,40 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 		t.Errorf("metric not preserved: %+v", m)
 	}
 }
+
+func TestCROSMetricExporterExport(t *testing.T) {
+	var gotPath string
+	var got *colmetricspb.ExportMetricsServiceRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		req := &colmetricspb.ExportMetricsServiceRequest{}
+		_ = proto.Unmarshal(body, req)
+		gotPath = r.URL.Path
+		got = req
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	exp, err := NewCROSExporter(server.URL, time.Second, RetryPolicy{})
+	if err != nil {
+		t.Fatalf("new cros exporter: %v", err)
+	}
+	err = exp.Export(context.Background(), Batch{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "app")}},
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+			Name: "cpu_seconds_total",
+			Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
+				TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 7},
+			}}}},
+		}}}},
+	}}})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if gotPath != "/v1/metrics" {
+		t.Fatalf("path = %q, want /v1/metrics", gotPath)
+	}
+	if got == nil || len(got.ResourceMetrics) != 1 {
+		t.Fatalf("unexpected metric request: %+v", got)
+	}
+}

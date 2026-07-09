@@ -36,6 +36,9 @@ type Config struct {
 	// MetricPipeline is the optional metrics path (wisp → coral → amber),
 	// independent of the trace pipeline above.
 	MetricPipeline *MetricPipelineConfig `yaml:"metric_pipeline"`
+
+	// LogPipeline is the optional logs path, independent of traces and metrics.
+	LogPipeline *LogPipelineConfig `yaml:"log_pipeline"`
 }
 
 // PipelineConfig configures pipeline concurrency.
@@ -176,9 +179,10 @@ type MetricsConfig struct {
 // MetricPipelineConfig configures the metrics pipeline: OTLP receivers, enrich
 // processors, and an amber exporter.
 type MetricPipelineConfig struct {
-	Receivers  MetricReceiversConfig `yaml:"receivers"`
-	Processors []ProcessorConfig     `yaml:"processors"`
-	Exporter   MetricExporterConfig  `yaml:"exporter"`
+	Receivers  MetricReceiversConfig  `yaml:"receivers"`
+	Processors []ProcessorConfig      `yaml:"processors"`
+	Exporter   MetricExporterConfig   `yaml:"exporter"`
+	Exporters  []MetricExporterConfig `yaml:"exporters"`
 }
 
 // MetricReceiversConfig configures the OTLP metric receivers.
@@ -193,6 +197,7 @@ func (m MetricReceiversConfig) AnyEnabled() bool {
 
 // MetricExporterConfig configures the amber metrics exporter.
 type MetricExporterConfig struct {
+	Type     string      `yaml:"type"`
 	Endpoint string      `yaml:"endpoint"`
 	Timeout  Duration    `yaml:"timeout"`
 	Retry    RetryConfig `yaml:"retry"`
@@ -219,8 +224,8 @@ func Parse(data []byte) (Config, error) {
 
 func (c *Config) Validate() error {
 	traceEnabled := c.Receivers.AnyEnabled()
-	if !traceEnabled && c.MetricPipeline == nil {
-		return fmt.Errorf("at least one receiver is required: enable a trace receiver or metric_pipeline")
+	if !traceEnabled && c.MetricPipeline == nil && c.LogPipeline == nil {
+		return fmt.Errorf("at least one receiver is required: enable a trace receiver, metric_pipeline, or log_pipeline")
 	}
 
 	if traceEnabled {
@@ -244,7 +249,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("exporters[%d]: type is required", i)
 			}
 			switch ec.Type {
-			case "devnull", "amber", "s3":
+			case "devnull", "amber", "cros", "s3":
 			default:
 				return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
 			}
@@ -256,6 +261,11 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if c.LogPipeline != nil {
+		if err := c.LogPipeline.validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -263,8 +273,19 @@ func (m *MetricPipelineConfig) validate() error {
 	if !m.Receivers.AnyEnabled() {
 		return fmt.Errorf("metric_pipeline.receivers: at least one OTLP receiver is required")
 	}
-	if m.Exporter.Endpoint == "" {
+	exporters := m.effectiveExporters()
+	if len(exporters) == 0 {
 		return fmt.Errorf("metric_pipeline.exporter.endpoint is required")
+	}
+	for i, exporter := range exporters {
+		if exporter.Endpoint == "" {
+			return fmt.Errorf("metric_pipeline.exporters[%d].endpoint is required", i)
+		}
+		switch exporter.metricType() {
+		case "amber", "cros":
+		default:
+			return fmt.Errorf("metric_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
 	}
 	for i, pc := range m.Processors {
 		if pc.Type == "" {
@@ -275,6 +296,86 @@ func (m *MetricPipelineConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+func (m MetricPipelineConfig) effectiveExporters() []MetricExporterConfig {
+	if len(m.Exporters) > 0 {
+		return m.Exporters
+	}
+	if m.Exporter.Endpoint != "" {
+		return []MetricExporterConfig{m.Exporter}
+	}
+	return nil
+}
+
+func (m MetricExporterConfig) metricType() string {
+	if m.Type == "" {
+		return "amber"
+	}
+	return m.Type
+}
+
+// LogPipelineConfig configures the logs pipeline: OTLP receivers and exporters.
+type LogPipelineConfig struct {
+	Receivers LogReceiversConfig  `yaml:"receivers"`
+	Exporter  LogExporterConfig   `yaml:"exporter"`
+	Exporters []LogExporterConfig `yaml:"exporters"`
+}
+
+// LogReceiversConfig configures the OTLP log receivers.
+type LogReceiversConfig struct {
+	OTLPGRPC *EndpointConfig `yaml:"otlp_grpc"`
+	OTLPHTTP *EndpointConfig `yaml:"otlp_http"`
+}
+
+func (l LogReceiversConfig) AnyEnabled() bool {
+	return l.OTLPGRPC != nil || l.OTLPHTTP != nil
+}
+
+// LogExporterConfig configures a log exporter.
+type LogExporterConfig struct {
+	Type     string      `yaml:"type"`
+	Endpoint string      `yaml:"endpoint"`
+	Timeout  Duration    `yaml:"timeout"`
+	Retry    RetryConfig `yaml:"retry"`
+}
+
+func (l *LogPipelineConfig) validate() error {
+	if !l.Receivers.AnyEnabled() {
+		return fmt.Errorf("log_pipeline.receivers: at least one OTLP receiver is required")
+	}
+	exporters := l.effectiveExporters()
+	if len(exporters) == 0 {
+		return fmt.Errorf("log_pipeline.exporter.endpoint is required")
+	}
+	for i, exporter := range exporters {
+		if exporter.Endpoint == "" {
+			return fmt.Errorf("log_pipeline.exporters[%d].endpoint is required", i)
+		}
+		switch exporter.logType() {
+		case "cros":
+		default:
+			return fmt.Errorf("log_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
+	}
+	return nil
+}
+
+func (l LogPipelineConfig) effectiveExporters() []LogExporterConfig {
+	if len(l.Exporters) > 0 {
+		return l.Exporters
+	}
+	if l.Exporter.Endpoint != "" {
+		return []LogExporterConfig{l.Exporter}
+	}
+	return nil
+}
+
+func (l LogExporterConfig) logType() string {
+	if l.Type == "" {
+		return "cros"
+	}
+	return l.Type
 }
 
 func (c ReceiversConfig) AnyEnabled() bool {

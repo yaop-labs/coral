@@ -137,6 +137,9 @@ exporters:
   - type: amber
     endpoint: "http://amber:8080"
     timeout: 10s
+  - type: cros
+    endpoint: "http://cros:8099"
+    timeout: 5s
   - type: s3
     bucket: "my-traces"
     region: "us-east-1"
@@ -145,11 +148,63 @@ exporters:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(cfg.Exporters) != 2 {
-		t.Fatalf("expected 2 exporters, got %d", len(cfg.Exporters))
+	if len(cfg.Exporters) != 3 {
+		t.Fatalf("expected 3 exporters, got %d", len(cfg.Exporters))
 	}
 	if cfg.Exporters[0].Type != "amber" {
 		t.Errorf("exporters[0].type = %q", cfg.Exporters[0].Type)
+	}
+}
+
+func TestParse_MetricExporters(t *testing.T) {
+	doc := []byte(`
+metric_pipeline:
+  receivers:
+    otlp_http:
+      endpoint: "127.0.0.1:4320"
+  exporters:
+    - type: amber
+      endpoint: "http://amber:8080"
+    - type: cros
+      endpoint: "http://cros:8099"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.MetricPipeline == nil {
+		t.Fatal("expected metric pipeline")
+	}
+	if len(cfg.MetricPipeline.Exporters) != 2 {
+		t.Fatalf("expected 2 metric exporters, got %d", len(cfg.MetricPipeline.Exporters))
+	}
+	if cfg.MetricPipeline.Exporters[1].Type != "cros" {
+		t.Fatalf("expected cros metric exporter, got %+v", cfg.MetricPipeline.Exporters[1])
+	}
+}
+
+func TestParse_LogExporters(t *testing.T) {
+	doc := []byte(`
+log_pipeline:
+  receivers:
+    otlp_http:
+      endpoint: "127.0.0.1:4321"
+  exporters:
+    - type: cros
+      endpoint: "http://cros:8099"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.LogPipeline == nil {
+		t.Fatal("expected log pipeline")
+	}
+	if len(cfg.LogPipeline.Exporters) != 1 {
+		t.Fatalf("expected 1 log exporter, got %d", len(cfg.LogPipeline.Exporters))
+	}
+	if cfg.LogPipeline.Exporters[0].Type != "cros" {
+		t.Fatalf("expected cros log exporter, got %+v", cfg.LogPipeline.Exporters[0])
 	}
 }
 

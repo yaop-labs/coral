@@ -10,9 +10,11 @@ import (
 
 	"github.com/yaop-labs/coral/internal/config"
 	amberexp "github.com/yaop-labs/coral/internal/exporter/amber"
+	crosexp "github.com/yaop-labs/coral/internal/exporter/cros"
 	"github.com/yaop-labs/coral/internal/exporter/devnull"
 	retryexp "github.com/yaop-labs/coral/internal/exporter/retry"
 	s3exp "github.com/yaop-labs/coral/internal/exporter/s3"
+	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/coral/internal/pipeline"
@@ -29,6 +31,7 @@ type App struct {
 	pipeline *pipeline.Pipeline
 
 	metricPipeline *metric.Pipeline // nil unless metric_pipeline is configured
+	logPipeline    *logs.Pipeline   // nil unless log_pipeline is configured
 
 	otlpHTTP   *otlprecv.HTTPReceiver
 	otlpGRPC   *otlprecv.GRPCReceiver
@@ -96,6 +99,14 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		a.metricPipeline = mp
 		logger.Info("metric pipeline enabled")
 	}
+	if cfg.LogPipeline != nil {
+		lp, err := buildLogPipeline(*cfg.LogPipeline, cfg.Pipeline, logger)
+		if err != nil {
+			return nil, fmt.Errorf("log_pipeline: %w", err)
+		}
+		a.logPipeline = lp
+		logger.Info("log pipeline enabled")
+	}
 
 	return a, nil
 }
@@ -129,16 +140,86 @@ func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineCo
 		}
 	}
 
-	exp, err := metric.NewAmberExporter(cfg.Exporter.Endpoint, cfg.Exporter.Timeout.Std(), metric.RetryPolicy{
-		MaxAttempts:    cfg.Exporter.Retry.MaxAttempts,
-		InitialBackoff: cfg.Exporter.Retry.InitialBackoff.Std(),
-		MaxBackoff:     cfg.Exporter.Retry.MaxBackoff.Std(),
-	})
-	if err != nil {
-		return nil, err
+	for _, exporterCfg := range metricExporters(cfg) {
+		exp, err := buildMetricExporter(exporterCfg)
+		if err != nil {
+			return nil, err
+		}
+		mp.AddExporter(exp)
 	}
-	mp.AddExporter(exp)
 	return mp, nil
+}
+
+func metricExporters(cfg config.MetricPipelineConfig) []config.MetricExporterConfig {
+	if len(cfg.Exporters) > 0 {
+		return cfg.Exporters
+	}
+	if cfg.Exporter.Endpoint != "" {
+		return []config.MetricExporterConfig{cfg.Exporter}
+	}
+	return nil
+}
+
+func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, error) {
+	retry := metric.RetryPolicy{
+		MaxAttempts:    cfg.Retry.MaxAttempts,
+		InitialBackoff: cfg.Retry.InitialBackoff.Std(),
+		MaxBackoff:     cfg.Retry.MaxBackoff.Std(),
+	}
+	switch cfg.Type {
+	case "", "amber":
+		return metric.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+	case "cros":
+		return metric.NewCROSExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+	default:
+		return nil, fmt.Errorf("metric exporter: unknown type %q", cfg.Type)
+	}
+}
+
+func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*logs.Pipeline, error) {
+	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger)
+
+	grpcAddr, httpAddr := "", ""
+	if cfg.Receivers.OTLPGRPC != nil {
+		grpcAddr = cfg.Receivers.OTLPGRPC.Endpoint
+	}
+	if cfg.Receivers.OTLPHTTP != nil {
+		httpAddr = cfg.Receivers.OTLPHTTP.Endpoint
+	}
+	lp.AddReceiver(logs.NewOTLPReceiver(grpcAddr, httpAddr, logger))
+
+	for _, exporterCfg := range logExporters(cfg) {
+		exp, err := buildLogExporter(exporterCfg)
+		if err != nil {
+			return nil, err
+		}
+		lp.AddExporter(exp)
+	}
+	return lp, nil
+}
+
+func logExporters(cfg config.LogPipelineConfig) []config.LogExporterConfig {
+	if len(cfg.Exporters) > 0 {
+		return cfg.Exporters
+	}
+	if cfg.Exporter.Endpoint != "" {
+		return []config.LogExporterConfig{cfg.Exporter}
+	}
+	return nil
+}
+
+func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
+	retry := logs.RetryPolicy{
+		MaxAttempts:    cfg.Retry.MaxAttempts,
+		InitialBackoff: cfg.Retry.InitialBackoff.Std(),
+		MaxBackoff:     cfg.Retry.MaxBackoff.Std(),
+	}
+	switch cfg.Type {
+	case "", "cros":
+		return logs.NewCROSExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+	default:
+		return nil, fmt.Errorf("log exporter: unknown type %q", cfg.Type)
+	}
 }
 
 // OTLPHTTPAddr returns the bound address of the OTLP HTTP receiver (for tests).
@@ -168,6 +249,11 @@ func (a *App) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if a.logPipeline != nil {
+		if err := a.logPipeline.Start(ctx); err != nil {
+			return err
+		}
+	}
 	return a.pipeline.Start(ctx)
 }
 
@@ -176,6 +262,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if a.metricPipeline != nil {
 		if mErr := a.metricPipeline.Shutdown(ctx); mErr != nil && err == nil {
 			err = mErr
+		}
+	}
+	if a.logPipeline != nil {
+		if lErr := a.logPipeline.Shutdown(ctx); lErr != nil && err == nil {
+			err = lErr
 		}
 	}
 	for i := len(a.stopHooks) - 1; i >= 0; i-- {
@@ -374,6 +465,21 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter, error) 
 			return nil, err
 		}
 		e, err := amberexp.New(cfg.Endpoint, cfg.Timeout.Std())
+		if err != nil {
+			return nil, err
+		}
+		return retryexp.Wrap(e, retryexp.Config{
+			MaxAttempts:    cfg.Retry.MaxAttempts,
+			InitialBackoff: cfg.Retry.InitialBackoff.Std(),
+			MaxBackoff:     cfg.Retry.MaxBackoff.Std(),
+		}), nil
+
+	case "cros":
+		var cfg config.AmberConfig
+		if err := ec.Raw.Decode(&cfg); err != nil {
+			return nil, err
+		}
+		e, err := crosexp.New(cfg.Endpoint, cfg.Timeout.Std())
 		if err != nil {
 			return nil, err
 		}
