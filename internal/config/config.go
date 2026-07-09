@@ -117,6 +117,7 @@ type ValidateConfig struct {
 // AttributeAction configures one attributes processor action.
 type AttributeAction struct {
 	Action string `yaml:"action"`
+	Scope  string `yaml:"scope"` // "span" (default) or "resource"
 	Key    string `yaml:"key"`
 	Value  string `yaml:"value"`
 	NewKey string `yaml:"new_key"`

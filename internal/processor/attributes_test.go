@@ -44,6 +44,45 @@ func TestAttributesProcessor_Add(t *testing.T) {
 	}
 }
 
+func TestAttributesProcessor_ResourceScope(t *testing.T) {
+	p, err := NewAttributes([]AttributeActionConfig{
+		{Action: "add", Scope: "resource", Key: "collector", Value: "coral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two spans sharing one resource attribute slice, as produced when they
+	// come from the same OTLP ResourceSpans.
+	shared := []model.Attribute{attr("service.name", "checkout")}
+	spans := []model.Span{
+		{Name: "a", Resource: model.Resource{Attrs: shared}},
+		{Name: "b", Resource: model.Resource{Attrs: shared}},
+	}
+	got, err := p.Process(context.Background(), model.Batch{Spans: spans})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, s := range got.Spans {
+		if s.Resource.AttrValue("collector") != "coral" {
+			t.Errorf("span %d: resource should carry collector=coral", i)
+		}
+		if s.AttrValue("collector") != "" {
+			t.Errorf("span %d: collector must land on the resource, not span attributes", i)
+		}
+	}
+	if len(shared) != 1 || shared[0].Key != "service.name" {
+		t.Errorf("shared resource slice was mutated: %+v", shared)
+	}
+}
+
+func TestAttributesProcessor_UnknownScope(t *testing.T) {
+	if _, err := NewAttributes([]AttributeActionConfig{
+		{Action: "add", Scope: "bogus", Key: "k", Value: "v"},
+	}); err == nil {
+		t.Fatal("expected error for unknown scope")
+	}
+}
+
 func TestAttributesProcessor_Add_Overwrite(t *testing.T) {
 	p, err := NewAttributes([]AttributeActionConfig{{Action: "add", Key: "env", Value: "prod"}})
 	if err != nil {

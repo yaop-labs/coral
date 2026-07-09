@@ -27,6 +27,12 @@ processors:
       - '[A-Za-z0-9_-]{40,}'
   - type: attributes
     actions:
+      # Enrichment lands on the resource so it reaches the store (contract §6).
+      - action: add
+        scope: resource
+        key: collector
+        value: coral
+      # Scrub a sensitive span attribute (default scope is span).
       - action: delete
         key: "http.request.header.authorization"
   - type: tail_sampling

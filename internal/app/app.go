@@ -388,6 +388,7 @@ func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline, a *App, pro
 		for i, a := range cfg.Actions {
 			actions[i] = processor.AttributeActionConfig{
 				Action: a.Action,
+				Scope:  a.Scope,
 				Key:    a.Key,
 				Value:  a.Value,
 				NewKey: a.NewKey,
