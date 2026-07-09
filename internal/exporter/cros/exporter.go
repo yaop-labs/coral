@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/yaop-labs/coral/internal/exporter/backoff"
 	"github.com/yaop-labs/coral/internal/model"
 )
 
@@ -42,11 +43,11 @@ func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
 	}
 	body, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("cros: marshal: %w", err)
+		return backoff.Permanent(fmt.Errorf("cros: marshal: %w", err))
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("cros: request: %w", err)
+		return backoff.Permanent(fmt.Errorf("cros: request: %w", err))
 	}
 	httpReq.Header.Set("Content-Type", "application/x-protobuf")
 
@@ -57,7 +58,7 @@ func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("cros: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return backoff.StatusError(resp.StatusCode, resp.Header, "cros: "+strings.TrimSpace(string(snippet)))
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil

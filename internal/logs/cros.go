@@ -12,26 +12,13 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+
+	"github.com/yaop-labs/coral/internal/exporter/backoff"
 )
 
-// RetryPolicy bounds the CROS log exporter's backoff.
-type RetryPolicy struct {
-	MaxAttempts    int
-	InitialBackoff time.Duration
-	MaxBackoff     time.Duration
-}
-
-func (r *RetryPolicy) applyDefaults() {
-	if r.MaxAttempts <= 0 {
-		r.MaxAttempts = 3
-	}
-	if r.InitialBackoff <= 0 {
-		r.InitialBackoff = 200 * time.Millisecond
-	}
-	if r.MaxBackoff <= 0 {
-		r.MaxBackoff = 5 * time.Second
-	}
-}
+// RetryPolicy is the shared retry policy; classification and backoff live in
+// the backoff package so every signal retries identically (contract §4).
+type RetryPolicy = backoff.Policy
 
 // CROSExporter posts OTLP log requests to CROS's /v1/logs endpoint.
 type CROSExporter struct {
@@ -47,7 +34,6 @@ func NewCROSExporter(endpoint string, timeout time.Duration, retry RetryPolicy) 
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	retry.applyDefaults()
 	url := strings.TrimRight(endpoint, "/")
 	if !strings.HasSuffix(url, "/v1/logs") {
 		url += "/v1/logs"
@@ -64,44 +50,29 @@ func (e *CROSExporter) Export(ctx context.Context, b Batch) error {
 	if err != nil {
 		return fmt.Errorf("cros logs: marshal: %w", err)
 	}
-	backoff := e.retry.InitialBackoff
-	var lastErr error
-	for attempt := 0; attempt < e.retry.MaxAttempts; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			backoff *= 2
-			if backoff > e.retry.MaxBackoff {
-				backoff = e.retry.MaxBackoff
-			}
-		}
-		if lastErr = e.post(ctx, body); lastErr == nil {
-			return nil
-		}
-	}
-	return lastErr
+	return e.retry.Do(ctx, func(ctx context.Context) error {
+		return post(ctx, e.client, e.url, "cros logs", body)
+	})
 }
 
-func (e *CROSExporter) post(ctx context.Context, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url, bytes.NewReader(body))
+func (e *CROSExporter) Close() error { return nil }
+
+// post sends one OTLP/protobuf log request and classifies the outcome per §4.
+func post(ctx context.Context, client *http.Client, url, who string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("cros logs: request: %w", err)
+		return backoff.Permanent(fmt.Errorf("%s: request: %w", who, err))
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	resp, err := e.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("cros logs: post: %w", err)
+		return fmt.Errorf("%s: post: %w", who, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("cros logs: status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return backoff.StatusError(resp.StatusCode, resp.Header, who+": "+strings.TrimSpace(string(snippet)))
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
-
-func (e *CROSExporter) Close() error { return nil }

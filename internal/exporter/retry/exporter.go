@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/yaop-labs/coral/internal/exporter/backoff"
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/coral/internal/pipeline"
 )
@@ -15,48 +16,28 @@ type Config struct {
 }
 
 type Exporter struct {
-	inner pipeline.Exporter
-	cfg   Config
+	inner  pipeline.Exporter
+	policy backoff.Policy
 }
 
+// Wrap adds retries to inner. The inner exporter classifies its failures
+// (backoff.Permanent / backoff.StatusError); Wrap only drives the backoff, so
+// permanent errors such as 4xx are surfaced without wasted retries.
 func Wrap(inner pipeline.Exporter, cfg Config) pipeline.Exporter {
 	if cfg.MaxAttempts <= 1 {
 		return inner
 	}
-	if cfg.InitialBackoff <= 0 {
-		cfg.InitialBackoff = 100 * time.Millisecond
-	}
-	if cfg.MaxBackoff <= 0 {
-		cfg.MaxBackoff = 5 * time.Second
-	}
-	if cfg.MaxBackoff < cfg.InitialBackoff {
-		cfg.MaxBackoff = cfg.InitialBackoff
-	}
-	return &Exporter{inner: inner, cfg: cfg}
+	return &Exporter{inner: inner, policy: backoff.Policy{
+		MaxAttempts:    cfg.MaxAttempts,
+		InitialBackoff: cfg.InitialBackoff,
+		MaxBackoff:     cfg.MaxBackoff,
+	}}
 }
 
 func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
-	var err error
-	backoff := e.cfg.InitialBackoff
-	for attempt := 1; attempt <= e.cfg.MaxAttempts; attempt++ {
-		err = e.inner.Export(ctx, b)
-		if err == nil {
-			return nil
-		}
-		if attempt == e.cfg.MaxAttempts {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > e.cfg.MaxBackoff {
-			backoff = e.cfg.MaxBackoff
-		}
-	}
-	return err
+	return e.policy.Do(ctx, func(ctx context.Context) error {
+		return e.inner.Export(ctx, b)
+	})
 }
 
 func (e *Exporter) Close() error {
