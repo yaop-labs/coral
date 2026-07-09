@@ -94,9 +94,8 @@ metric_pipeline:
         initial_backoff: 100ms
         max_backoff: 5s
 
-# Logs pipeline for incident-context fan-out. CROS already accepts OTLP logs;
-# Amber log storage can stay on its own path until Amber exposes a matching
-# OTLP log ingest route.
+# Logs pipeline. Amber is the source of truth and must receive logs; CROS is an
+# additional incident-context fan-out.
 log_pipeline:
   receivers:
     otlp_grpc:
@@ -104,6 +103,13 @@ log_pipeline:
     otlp_http:
       endpoint: "0.0.0.0:4322"
   exporters:
+    - type: amber
+      endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/logs
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s
     - type: cros
       endpoint: "http://127.0.0.1:8099" # CROS OTLP/HTTP /v1/logs
       timeout: 5s

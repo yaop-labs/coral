@@ -215,7 +215,9 @@ func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
 		MaxBackoff:     cfg.Retry.MaxBackoff.Std(),
 	}
 	switch cfg.Type {
-	case "", "cros":
+	case "", "amber":
+		return logs.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+	case "cros":
 		return logs.NewCROSExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
 	default:
 		return nil, fmt.Errorf("log exporter: unknown type %q", cfg.Type)

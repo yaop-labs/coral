@@ -208,6 +208,31 @@ log_pipeline:
 	}
 }
 
+func TestParse_LogExporter_Amber(t *testing.T) {
+	// Logs must be allowed to reach amber (the source of truth); an untyped
+	// exporter defaults to amber. Both used to be rejected by validation.
+	doc := []byte(`
+log_pipeline:
+  receivers:
+    otlp_http:
+      endpoint: "127.0.0.1:4321"
+  exporters:
+    - type: amber
+      endpoint: "http://amber:8080"
+    - endpoint: "http://amber:8080"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.LogPipeline == nil {
+		t.Fatal("expected log pipeline")
+	}
+	if got := cfg.LogPipeline.Exporters[1].logType(); got != "amber" {
+		t.Fatalf("untyped log exporter should default to amber, got %q", got)
+	}
+}
+
 func TestParse_InvalidYAMLReturnsError(t *testing.T) {
 	_, err := Parse([]byte("this is: not: valid: yaml"))
 	if err == nil {

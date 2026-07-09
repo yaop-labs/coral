@@ -353,7 +353,7 @@ func (l *LogPipelineConfig) validate() error {
 			return fmt.Errorf("log_pipeline.exporters[%d].endpoint is required", i)
 		}
 		switch exporter.logType() {
-		case "cros":
+		case "amber", "cros":
 		default:
 			return fmt.Errorf("log_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
 		}
@@ -373,7 +373,7 @@ func (l LogPipelineConfig) effectiveExporters() []LogExporterConfig {
 
 func (l LogExporterConfig) logType() string {
 	if l.Type == "" {
-		return "cros"
+		return "amber"
 	}
 	return l.Type
 }
