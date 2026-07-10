@@ -37,4 +37,4 @@ exporters:
       max_backoff: 5s
 
 metrics:
-  endpoint: "0.0.0.0:8888"
+  endpoint: "0.0.0.0:4888"

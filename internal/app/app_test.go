@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +46,42 @@ func TestApp_StartShutdownIsClean(t *testing.T) {
 	if err := a.Shutdown(stopCtx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
+}
+
+func TestApp_SelfObsMux(t *testing.T) {
+	a, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := a.selfObsMux(a.pipeline)
+
+	if code := selfObsGet(t, h, "/readyz"); code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz before ready = %d, want 503", code)
+	}
+	a.ready.Store(true)
+	if code := selfObsGet(t, h, "/readyz"); code != http.StatusOK {
+		t.Errorf("/readyz after ready = %d, want 200", code)
+	}
+	if code := selfObsGet(t, h, "/healthz"); code != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200", code)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "coral_batches_in") {
+		t.Errorf("/metrics missing coral_* metric:\n%s", body)
+	}
+	if strings.Contains(body, "collector_") {
+		t.Errorf("/metrics still uses the legacy collector_ prefix:\n%s", body)
+	}
+}
+
+func selfObsGet(t *testing.T, h http.Handler, path string) int {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec.Code
 }
 
 func TestApp_NoReceivers(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/yaop-labs/coral/internal/config"
 	amberexp "github.com/yaop-labs/coral/internal/exporter/amber"
@@ -37,6 +38,8 @@ type App struct {
 	otlpGRPC   *otlprecv.GRPCReceiver
 	startHooks []func(context.Context) error
 	stopHooks  []func(context.Context) error
+
+	ready atomic.Bool // set once all pipelines and receivers are started
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -256,7 +259,11 @@ func (a *App) Start(ctx context.Context) error {
 			return err
 		}
 	}
-	return a.pipeline.Start(ctx)
+	if err := a.pipeline.Start(ctx); err != nil {
+		return err
+	}
+	a.ready.Store(true)
+	return nil
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
@@ -285,22 +292,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 func (a *App) addMetricsServer(p *pipeline.Pipeline, endpoint string) {
 	var srv *http.Server
 	a.startHooks = append(a.startHooks, func(ctx context.Context) error {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-			batchesIn, batchesDropped, spansOut := p.Stats()
-			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-			_, _ = fmt.Fprintf(w, "# TYPE collector_batches_in counter\ncollector_batches_in %d\n", batchesIn)
-			_, _ = fmt.Fprintf(w, "# TYPE collector_batches_dropped counter\ncollector_batches_dropped %d\n", batchesDropped)
-			_, _ = fmt.Fprintf(w, "# TYPE collector_spans_out counter\ncollector_spans_out %d\n", spansOut)
-		})
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
 		ln, err := net.Listen("tcp", endpoint)
 		if err != nil {
 			return fmt.Errorf("metrics: listen %s: %w", endpoint, err)
 		}
-		srv = &http.Server{Handler: mux}
+		srv = &http.Server{Handler: a.selfObsMux(p)}
 		go func() {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && ctx.Err() == nil {
 				a.logger.Error("metrics server error", "err", err)
@@ -314,6 +310,37 @@ func (a *App) addMetricsServer(p *pipeline.Pipeline, endpoint string) {
 		}
 		return srv.Shutdown(ctx)
 	})
+}
+
+// selfObsMux serves the operational endpoints: Prometheus-text /metrics
+// (coral_* names, all signal pipelines) plus liveness /healthz and readiness
+// /readyz (contract §9).
+func (a *App) selfObsMux(p *pipeline.Pipeline) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		batchesIn, batchesDropped, spansOut := p.Stats()
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_in counter\ncoral_batches_in %d\n", batchesIn)
+		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_dropped counter\ncoral_batches_dropped %d\n", batchesDropped)
+		_, _ = fmt.Fprintf(w, "# TYPE coral_spans_out counter\ncoral_spans_out %d\n", spansOut)
+		if a.metricPipeline != nil {
+			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", a.metricPipeline.PointsOut())
+		}
+		if a.logPipeline != nil {
+			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", a.logPipeline.RecordsOut())
+		}
+	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if a.ready.Load() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	return mux
 }
 
 func (a *App) addReceivers(p *pipeline.Pipeline, cfg config.ReceiversConfig, logger *slog.Logger) error {

@@ -67,7 +67,7 @@ exporters:
       max_backoff: 5s
 
 metrics:
-  endpoint: "0.0.0.0:8888"
+  endpoint: "0.0.0.0:4888"
 
 # Metrics pipeline (wisp → coral → amber), independent of the trace pipeline.
 # Receives OTLP metrics from agents, enriches resource attributes, forwards to
