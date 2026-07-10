@@ -58,6 +58,12 @@ func fromZipkin(zs zipkinSpan) (model.Span, error) {
 		return model.Span{}, fmt.Errorf("span_id: %w", err)
 	}
 
+	// timestamp is optional in the Zipkin model, but coral needs a real start
+	// time: a zero value would silently become 1970. Reject such spans instead.
+	if zs.Timestamp == 0 {
+		return model.Span{}, fmt.Errorf("timestamp: required")
+	}
+
 	s := model.Span{
 		TraceID:   traceID,
 		SpanID:    spanID,

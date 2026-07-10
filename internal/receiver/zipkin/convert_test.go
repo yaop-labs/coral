@@ -171,6 +171,23 @@ func TestKindFromZipkin(t *testing.T) {
 	}
 }
 
+func TestZeroTimestampSkipped(t *testing.T) {
+	// A span without a timestamp must be dropped, not emitted with a 1970 start.
+	body := []byte(`[{
+		"traceId": "00000000000000000000000000000001",
+		"id": "0000000000000001",
+		"name": "no-ts",
+		"duration": 2000
+	}]`)
+	spans, err := decodeSpans(body)
+	if err != nil {
+		t.Fatalf("decodeSpans: %v", err)
+	}
+	if len(spans) != 0 {
+		t.Fatalf("expected 0 spans (zero timestamp dropped), got %d", len(spans))
+	}
+}
+
 func TestStartTime(t *testing.T) {
 	body := []byte(`[{
 		"traceId": "00000000000000000000000000000001",
