@@ -16,6 +16,8 @@ import (
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 
 	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
@@ -29,10 +31,20 @@ const defaultMaxRecvBytes = 16 << 20
 // pipeline. A nil callback means that signal is not served: its gRPC service is
 // left unregistered (standard clients see Unimplemented) and its HTTP route
 // returns 404.
+//
+// The optional *Admit hooks run synchronously at accept time: they return the
+// records to admit plus the count and reason of records rejected as permanently
+// invalid. Rejections are reported to the sender via OTLP partial_success
+// (contract §4) so it does not retry them; admitted records are enqueued as
+// usual. A nil Admit hook admits everything.
 type Sink struct {
 	Traces  func(context.Context, model.Batch) error
 	Metrics func(context.Context, metric.Batch) error
 	Logs    func(context.Context, logs.Batch) error
+
+	TraceAdmit  func(model.Batch) (admit model.Batch, rejected int, reason string)
+	MetricAdmit func(metric.Batch) (admit metric.Batch, rejected int, reason string)
+	LogAdmit    func(logs.Batch) (admit logs.Batch, rejected int, reason string)
 }
 
 // Server is the unified OTLP ingress: one gRPC server and one HTTP mux serving
@@ -58,6 +70,9 @@ type Server struct {
 	tracesAccepted atomic.Uint64
 	pointsAccepted atomic.Uint64
 	logsAccepted   atomic.Uint64
+	tracesRejected atomic.Uint64
+	pointsRejected atomic.Uint64
+	logsRejected   atomic.Uint64
 }
 
 // NewServer builds an ingress bound to grpcAddr and/or httpAddr (either may be
@@ -180,6 +195,67 @@ func (s *Server) Stats() (requests, errs, traces, points, logs uint64) {
 		s.tracesAccepted.Load(), s.pointsAccepted.Load(), s.logsAccepted.Load()
 }
 
+// Rejected reports records refused at accept time and reported via
+// partial_success (spans, data points, log records).
+func (s *Server) Rejected() (traces, points, logs uint64) {
+	return s.tracesRejected.Load(), s.pointsRejected.Load(), s.logsRejected.Load()
+}
+
+// --- accept-time admission ---
+
+// admitTraces applies the trace admit hook (if any), enqueues the admitted
+// spans, and reports how many were rejected as invalid (partial_success).
+func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected int, reason string, err error) {
+	b := model.Batch{Spans: spans}
+	if s.sink.TraceAdmit != nil {
+		b, rejected, reason = s.sink.TraceAdmit(b)
+	}
+	if b.Len() > 0 {
+		if err = s.sink.Traces(ctx, b); err != nil {
+			return 0, "", err
+		}
+		s.tracesAccepted.Add(uint64(b.Len()))
+	}
+	if rejected > 0 {
+		s.tracesRejected.Add(uint64(rejected))
+	}
+	return rejected, reason, nil
+}
+
+func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetrics) (rejected int, reason string, err error) {
+	b := metric.Batch{ResourceMetrics: rm}
+	if s.sink.MetricAdmit != nil {
+		b, rejected, reason = s.sink.MetricAdmit(b)
+	}
+	if b.Len() > 0 {
+		if err = s.sink.Metrics(ctx, b); err != nil {
+			return 0, "", err
+		}
+		s.pointsAccepted.Add(uint64(b.Len()))
+	}
+	if rejected > 0 {
+		s.pointsRejected.Add(uint64(rejected))
+	}
+	return rejected, reason, nil
+}
+
+func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (rejected int, reason string, err error) {
+	b := logs.Batch{ResourceLogs: rl}
+	if s.sink.LogAdmit != nil {
+		b, rejected, reason = s.sink.LogAdmit(b)
+	}
+	if b.Len() > 0 {
+		if err = s.sink.Logs(ctx, b); err != nil {
+			return 0, "", err
+		}
+		s.logsAccepted.Add(uint64(b.Len()))
+	}
+	if rejected > 0 {
+		s.logsRejected.Add(uint64(rejected))
+	}
+	return rejected, reason, nil
+}
+
 // --- gRPC services ---
 
 type grpcTraceService struct {
@@ -190,15 +266,18 @@ type grpcTraceService struct {
 func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
 	g.s.requests.Add(1)
 	spans := spansFromResourceSpans(req.GetResourceSpans())
-	if len(spans) == 0 {
-		return &coltracepb.ExportTraceServiceResponse{}, nil
-	}
-	if err := g.s.sink.Traces(ctx, model.Batch{Spans: spans}); err != nil {
+	rejected, reason, err := g.s.admitTraces(ctx, spans)
+	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
-	g.s.tracesAccepted.Add(uint64(len(spans)))
-	return &coltracepb.ExportTraceServiceResponse{}, nil
+	resp := &coltracepb.ExportTraceServiceResponse{}
+	if rejected > 0 {
+		resp.PartialSuccess = &coltracepb.ExportTracePartialSuccess{
+			RejectedSpans: int64(rejected), ErrorMessage: reason,
+		}
+	}
+	return resp, nil
 }
 
 type grpcMetricsService struct {
@@ -208,15 +287,18 @@ type grpcMetricsService struct {
 
 func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	g.s.requests.Add(1)
-	b := metric.Batch{ResourceMetrics: req.GetResourceMetrics()}
-	if n := b.Len(); n > 0 {
-		if err := g.s.sink.Metrics(ctx, b); err != nil {
-			g.s.errs.Add(1)
-			return nil, status.Error(codes.Unavailable, "pipeline unavailable")
-		}
-		g.s.pointsAccepted.Add(uint64(n))
+	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
+	if err != nil {
+		g.s.errs.Add(1)
+		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
-	return &colmetricspb.ExportMetricsServiceResponse{}, nil
+	resp := &colmetricspb.ExportMetricsServiceResponse{}
+	if rejected > 0 {
+		resp.PartialSuccess = &colmetricspb.ExportMetricsPartialSuccess{
+			RejectedDataPoints: int64(rejected), ErrorMessage: reason,
+		}
+	}
+	return resp, nil
 }
 
 type grpcLogsService struct {
@@ -226,15 +308,18 @@ type grpcLogsService struct {
 
 func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
 	g.s.requests.Add(1)
-	b := logs.Batch{ResourceLogs: req.GetResourceLogs()}
-	if n := b.Len(); n > 0 {
-		if err := g.s.sink.Logs(ctx, b); err != nil {
-			g.s.errs.Add(1)
-			return nil, status.Error(codes.Unavailable, "pipeline unavailable")
-		}
-		g.s.logsAccepted.Add(uint64(n))
+	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
+	if err != nil {
+		g.s.errs.Add(1)
+		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
-	return &collogspb.ExportLogsServiceResponse{}, nil
+	resp := &collogspb.ExportLogsServiceResponse{}
+	if rejected > 0 {
+		resp.PartialSuccess = &collogspb.ExportLogsPartialSuccess{
+			RejectedLogRecords: int64(rejected), ErrorMessage: reason,
+		}
+	}
+	return resp, nil
 }
 
 // --- HTTP handlers ---
@@ -253,15 +338,19 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	spans := spansFromResourceSpans(pb.GetResourceSpans())
-	if len(spans) > 0 {
-		if err := s.sink.Traces(req.Context(), model.Batch{Spans: spans}); err != nil {
-			s.errs.Add(1)
-			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		s.tracesAccepted.Add(uint64(len(spans)))
+	rejected, reason, err := s.admitTraces(req.Context(), spans)
+	if err != nil {
+		s.errs.Add(1)
+		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		return
 	}
-	writeProtoResponse(w, &coltracepb.ExportTraceServiceResponse{})
+	resp := &coltracepb.ExportTraceServiceResponse{}
+	if rejected > 0 {
+		resp.PartialSuccess = &coltracepb.ExportTracePartialSuccess{
+			RejectedSpans: int64(rejected), ErrorMessage: reason,
+		}
+	}
+	writeProtoResponse(w, resp)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
@@ -277,16 +366,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	b := metric.Batch{ResourceMetrics: pb.GetResourceMetrics()}
-	if n := b.Len(); n > 0 {
-		if err := s.sink.Metrics(req.Context(), b); err != nil {
-			s.errs.Add(1)
-			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		s.pointsAccepted.Add(uint64(n))
+	rejected, reason, err := s.admitMetrics(req.Context(), pb.GetResourceMetrics())
+	if err != nil {
+		s.errs.Add(1)
+		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		return
 	}
-	writeProtoResponse(w, &colmetricspb.ExportMetricsServiceResponse{})
+	resp := &colmetricspb.ExportMetricsServiceResponse{}
+	if rejected > 0 {
+		resp.PartialSuccess = &colmetricspb.ExportMetricsPartialSuccess{
+			RejectedDataPoints: int64(rejected), ErrorMessage: reason,
+		}
+	}
+	writeProtoResponse(w, resp)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
@@ -302,16 +394,19 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	b := logs.Batch{ResourceLogs: pb.GetResourceLogs()}
-	if n := b.Len(); n > 0 {
-		if err := s.sink.Logs(req.Context(), b); err != nil {
-			s.errs.Add(1)
-			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		s.logsAccepted.Add(uint64(n))
+	rejected, reason, err := s.admitLogs(req.Context(), pb.GetResourceLogs())
+	if err != nil {
+		s.errs.Add(1)
+		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		return
 	}
-	writeProtoResponse(w, &collogspb.ExportLogsServiceResponse{})
+	resp := &collogspb.ExportLogsServiceResponse{}
+	if rejected > 0 {
+		resp.PartialSuccess = &collogspb.ExportLogsPartialSuccess{
+			RejectedLogRecords: int64(rejected), ErrorMessage: reason,
+		}
+	}
+	writeProtoResponse(w, resp)
 }
 
 func writeProtoResponse(w http.ResponseWriter, m proto.Message) {

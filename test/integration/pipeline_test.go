@@ -705,6 +705,48 @@ func TestE2E_LogRedaction(t *testing.T) {
 	}
 }
 
+// TestE2E_PartialSuccess_OversizedSpanReported drives a batch of one oversized
+// and one valid span through the app: the oversized span is rejected at accept
+// time (validate.max_span_bytes) and reported via partial_success, while the
+// valid span still reaches the exporter (contract §4, B-3).
+func TestE2E_PartialSuccess_OversizedSpanReported(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Processors = []config.ProcessorConfig{processorCfg(t, "type: validate\nmax_span_bytes: 150")}
+	a, cap := startApp(t, cfg)
+
+	big := makeSpanRequest([16]byte{0xB1}, [8]byte{0xB1}, string(make([]byte, 300)), false)
+	small := makeSpanRequest([16]byte{0x51}, [8]byte{0x51}, "ok", false)
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: append(big.ResourceSpans, small.ResourceSpans...),
+	}
+
+	body, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+a.OTLPHTTPAddr()+"/v1/traces", "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out coltracepb.ExportTraceServiceResponse
+	if err := proto.Unmarshal(rb, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.GetPartialSuccess().GetRejectedSpans() != 1 {
+		t.Errorf("rejected_spans = %d, want 1", out.GetPartialSuccess().GetRejectedSpans())
+	}
+
+	waitFor(t, 2*time.Second, func() bool { return cap.count() == 1 })
+	if cap.count() != 1 {
+		t.Errorf("exported = %d, want 1 (valid span kept)", cap.count())
+	}
+}
+
 func TestE2E_MultiReceiver_BothDeliver(t *testing.T) {
 	cfg := baseConfig()
 	cap := &capturingExporter{}

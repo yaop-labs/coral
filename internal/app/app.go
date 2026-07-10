@@ -114,15 +114,16 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		logger.Info("log pipeline enabled")
 	}
 
-	a.addIngress(cfg.Receivers, traceActive)
+	a.addIngress(cfg.Receivers, traceActive, validateSpanLimit(cfg.Processors))
 	return a, nil
 }
 
 // addIngress builds the unified OTLP endpoint from the top-level receiver
 // config, routing each signal to the pipeline that serves it. Signals whose
 // pipeline is absent are left unserved (Unimplemented / 404). A config with
-// only legacy trace receivers builds no ingress.
-func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool) {
+// only legacy trace receivers builds no ingress. spanLimit (>0) enables
+// accept-time rejection of oversized spans with a partial_success report.
+func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool, spanLimit int) {
 	grpcAddr, httpAddr := "", ""
 	if cfg.OTLPGRPC != nil {
 		grpcAddr = cfg.OTLPGRPC.Endpoint
@@ -136,6 +137,9 @@ func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool) {
 	sink := otlprecv.Sink{}
 	if traceActive {
 		sink.Traces = a.pipeline.Enqueue
+		if spanLimit > 0 {
+			sink.TraceAdmit = traceSizeAdmit(spanLimit)
+		}
 	}
 	if a.metricPipeline != nil {
 		sink.Metrics = a.metricPipeline.Enqueue
@@ -145,6 +149,49 @@ func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool) {
 	}
 	a.ingress = otlprecv.NewServer(grpcAddr, httpAddr, 0, sink)
 	a.logger.Info("otlp ingress enabled", "grpc", grpcAddr, "http", httpAddr)
+}
+
+// validateSpanLimit returns the span-size limit of a configured validate
+// processor (mirroring its default), or 0 if none is configured. The ingress
+// uses it to reject oversized spans at accept time and report them via OTLP
+// partial_success (contract §4), rather than dropping them silently downstream.
+func validateSpanLimit(procs []config.ProcessorConfig) int {
+	for _, pc := range procs {
+		if pc.Type != "validate" {
+			continue
+		}
+		var vc config.ValidateConfig
+		if err := pc.Raw.Decode(&vc); err != nil {
+			return 0
+		}
+		if vc.MaxSpanBytes > 0 {
+			return vc.MaxSpanBytes
+		}
+		return 64 * 1024 // matches processor.ValidateProcessor's default
+	}
+	return 0
+}
+
+// traceSizeAdmit builds an accept-time admit hook that rejects spans over
+// maxSpanBytes, so the sender is told (partial_success) rather than silently
+// losing them or retrying invalid records.
+func traceSizeAdmit(maxSpanBytes int) func(model.Batch) (model.Batch, int, string) {
+	return func(b model.Batch) (model.Batch, int, string) {
+		kept := b.Spans[:0]
+		rejected := 0
+		for _, s := range b.Spans {
+			if s.SizeBytes() > maxSpanBytes {
+				rejected++
+				continue
+			}
+			kept = append(kept, s)
+		}
+		reason := ""
+		if rejected > 0 {
+			reason = fmt.Sprintf("rejected %d span(s) exceeding max_span_bytes=%d", rejected, maxSpanBytes)
+		}
+		return model.Batch{Spans: kept}, rejected, reason
+	}
 }
 
 func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*metric.Pipeline, error) {

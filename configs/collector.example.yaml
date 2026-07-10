@@ -23,6 +23,8 @@ receivers:
     endpoint: "0.0.0.0:9411"
 
 processors:
+  # Spans over max_span_bytes are rejected at ingest and reported to the sender
+  # via OTLP partial_success (contract §4), not retried; creds are redacted.
   - type: validate
     max_span_bytes: 65536
     creds_patterns:

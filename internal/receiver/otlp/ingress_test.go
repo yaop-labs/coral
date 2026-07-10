@@ -3,6 +3,7 @@ package otlp
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -248,6 +249,79 @@ func TestIngress_HTTP_Healthz(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// rejectNamed builds a trace admit hook that rejects spans named "reject",
+// standing in for any accept-time validation (e.g. oversized spans).
+func rejectNamed(b model.Batch) (model.Batch, int, string) {
+	kept := b.Spans[:0]
+	rejected := 0
+	for _, s := range b.Spans {
+		if s.Name == "reject" {
+			rejected++
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return model.Batch{Spans: kept}, rejected, "rejected test spans"
+}
+
+func twoSpanReq() *coltracepb.ExportTraceServiceRequest {
+	return &coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
+		ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{
+			{TraceId: make([]byte, 16), SpanId: make([]byte, 8), Name: "reject"},
+			{TraceId: make([]byte, 16), SpanId: make([]byte, 8), Name: "keep"},
+		}}},
+	}}}
+}
+
+// TestIngress_HTTP_PartialSuccess proves a partially-invalid batch is answered
+// 200 with partial_success (contract §4) — the sender must not retry — while the
+// valid records are still admitted.
+func TestIngress_HTTP_PartialSuccess(t *testing.T) {
+	c := &capture{}
+	sink := c.sink()
+	sink.TraceAdmit = rejectNamed
+	s := startIngress(t, sink)
+
+	resp := postProto(t, s.HTTPAddr(), "/v1/traces", twoSpanReq())
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var out coltracepb.ExportTraceServiceResponse
+	if err := proto.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.GetPartialSuccess().GetRejectedSpans() != 1 {
+		t.Errorf("rejected_spans = %d, want 1", out.GetPartialSuccess().GetRejectedSpans())
+	}
+	if out.GetPartialSuccess().GetErrorMessage() == "" {
+		t.Error("partial_success error_message should be set")
+	}
+	waitCounts(t, c, 1, 0, 0) // the one kept span was admitted
+}
+
+// TestIngress_GRPC_PartialSuccess is the gRPC counterpart.
+func TestIngress_GRPC_PartialSuccess(t *testing.T) {
+	c := &capture{}
+	sink := c.sink()
+	sink.TraceAdmit = rejectNamed
+	s := startIngress(t, sink)
+	conn := dialGRPC(t, s.GRPCAddr())
+
+	resp, err := coltracepb.NewTraceServiceClient(conn).Export(context.Background(), twoSpanReq())
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if resp.GetPartialSuccess().GetRejectedSpans() != 1 {
+		t.Errorf("rejected_spans = %d, want 1", resp.GetPartialSuccess().GetRejectedSpans())
+	}
+	waitCounts(t, c, 1, 0, 0)
+	if tr, _, _ := s.Rejected(); tr != 1 {
+		t.Errorf("Rejected traces = %d, want 1", tr)
 	}
 }
 
