@@ -250,13 +250,13 @@ func (r *fakeReceiver) Send(ctx context.Context, b model.Batch) error {
 	return emit(ctx, b)
 }
 
-var _ pipeline.Receiver = (*fakeReceiver)(nil)
+var _ pipeline.Receiver[model.Batch] = (*fakeReceiver)(nil)
 
 func TestIntegration_FakeReceiver_SpanFlowsThroughPipeline(t *testing.T) {
 	cap := &capturingExporter{}
 	recv := newFakeReceiver()
 
-	p := pipeline.New(pipeline.Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p := pipeline.New[model.Batch](pipeline.Config{Workers: 1, QueueSize: 16}, slog.Default())
 	p.AddReceiver(recv)
 	p.AddExporter(cap)
 
@@ -416,7 +416,7 @@ func TestE2E_AttributesProcessor_DeletesKey(t *testing.T) {
 // traces and resumes the pipeline after the sampler.
 func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 	cap := &capturingExporter{}
-	p := pipeline.New(pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
+	p := pipeline.New[model.Batch](pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
 
 	ts := sampling.NewTail(
 		30*time.Millisecond,
@@ -469,7 +469,7 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 // when the sampler has only an error rule and a zero default keep rate.
 func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 	cap := &capturingExporter{}
-	p := pipeline.New(pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
+	p := pipeline.New[model.Batch](pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
 
 	ts := sampling.NewTail(
 		30*time.Millisecond,

@@ -29,7 +29,7 @@ import (
 // App is a fully wired but unstarted collector.
 type App struct {
 	logger   *slog.Logger
-	pipeline *pipeline.Pipeline
+	pipeline *pipeline.Pipeline[model.Batch]
 
 	metricPipeline *metric.Pipeline // nil unless metric_pipeline is configured
 	logPipeline    *logs.Pipeline   // nil unless log_pipeline is configured
@@ -47,11 +47,11 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 }
 
 // NewWithExporter builds an App using exp instead of the configured exporters.
-func NewWithExporter(cfg config.Config, logger *slog.Logger, exp pipeline.Exporter) (*App, error) {
+func NewWithExporter(cfg config.Config, logger *slog.Logger, exp pipeline.Exporter[model.Batch]) (*App, error) {
 	return newApp(cfg, logger, exp)
 }
 
-func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporter) (*App, error) {
+func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporter[model.Batch]) (*App, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -59,7 +59,7 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		return nil, err
 	}
 
-	p := pipeline.New(pipeline.Config{
+	p := pipeline.New[model.Batch](pipeline.Config{
 		Workers:   cfg.Pipeline.Workers,
 		QueueSize: cfg.Pipeline.QueueSize,
 	}, logger)
@@ -289,7 +289,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return err
 }
 
-func (a *App) addMetricsServer(p *pipeline.Pipeline, endpoint string) {
+func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], endpoint string) {
 	var srv *http.Server
 	a.startHooks = append(a.startHooks, func(ctx context.Context) error {
 		ln, err := net.Listen("tcp", endpoint)
@@ -315,7 +315,7 @@ func (a *App) addMetricsServer(p *pipeline.Pipeline, endpoint string) {
 // selfObsMux serves the operational endpoints: Prometheus-text /metrics
 // (coral_* names, all signal pipelines) plus liveness /healthz and readiness
 // /readyz (contract §9).
-func (a *App) selfObsMux(p *pipeline.Pipeline) http.Handler {
+func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		batchesIn, batchesDropped, spansOut := p.Stats()
@@ -324,10 +324,12 @@ func (a *App) selfObsMux(p *pipeline.Pipeline) http.Handler {
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_dropped counter\ncoral_batches_dropped %d\n", batchesDropped)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_spans_out counter\ncoral_spans_out %d\n", spansOut)
 		if a.metricPipeline != nil {
-			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", a.metricPipeline.PointsOut())
+			_, _, pointsOut := a.metricPipeline.Stats()
+			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", pointsOut)
 		}
 		if a.logPipeline != nil {
-			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", a.logPipeline.RecordsOut())
+			_, _, recordsOut := a.logPipeline.Stats()
+			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", recordsOut)
 		}
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -343,7 +345,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline) http.Handler {
 	return mux
 }
 
-func (a *App) addReceivers(p *pipeline.Pipeline, cfg config.ReceiversConfig, logger *slog.Logger) error {
+func (a *App) addReceivers(p *pipeline.Pipeline[model.Batch], cfg config.ReceiversConfig, logger *slog.Logger) error {
 	if cfg.OTLPGRPC != nil {
 		r, err := otlprecv.NewGRPC(cfg.OTLPGRPC.Endpoint, 0)
 		if err != nil {
@@ -397,7 +399,7 @@ func (a *App) addReceivers(p *pipeline.Pipeline, cfg config.ReceiversConfig, log
 	return nil
 }
 
-func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline, a *App, processorIndex int) (pipeline.Processor, error) {
+func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline[model.Batch], a *App, processorIndex int) (pipeline.Processor[model.Batch], error) {
 	switch pc.Type {
 	case "validate":
 		var cfg config.ValidateConfig
@@ -484,7 +486,7 @@ func buildSamplingRules(cfgs []config.SamplingRule) ([]sampling.Rule, error) {
 	return rules, nil
 }
 
-func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter, error) {
+func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Batch], error) {
 	switch ec.Type {
 	case "devnull":
 		return devnull.New(), nil

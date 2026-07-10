@@ -16,14 +16,14 @@ type Config struct {
 }
 
 type Exporter struct {
-	inner  pipeline.Exporter
+	inner  pipeline.Exporter[model.Batch]
 	policy backoff.Policy
 }
 
 // Wrap adds retries to inner. The inner exporter classifies its failures
 // (backoff.Permanent / backoff.StatusError); Wrap only drives the backoff, so
 // permanent errors such as 4xx are surfaced without wasted retries.
-func Wrap(inner pipeline.Exporter, cfg Config) pipeline.Exporter {
+func Wrap(inner pipeline.Exporter[model.Batch], cfg Config) pipeline.Exporter[model.Batch] {
 	if cfg.MaxAttempts <= 1 {
 		return inner
 	}

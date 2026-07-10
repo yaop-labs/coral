@@ -1,15 +1,15 @@
-// Package logs is coral's logs pipeline: it receives OTLP logs from agents and
-// forwards them without lossy conversion.
+// Package logs is coral's logs path: it receives OTLP logs from agents,
+// optionally redacts them, and forwards them without lossy conversion. It
+// shares the generic worker-pool in internal/pipeline with the trace and metric
+// paths.
 package logs
 
 import (
-	"context"
 	"log/slog"
-	"runtime"
-	"sync"
-	"sync/atomic"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+
+	"github.com/yaop-labs/coral/internal/pipeline"
 )
 
 // Batch is a set of OTLP ResourceLogs flowing through the pipeline.
@@ -17,10 +17,11 @@ type Batch struct {
 	ResourceLogs []*logspb.ResourceLogs
 }
 
-func (b Batch) Empty() bool { return len(b.ResourceLogs) == 0 }
+func (b Batch) Empty() bool { return b.Len() == 0 }
 
-// Records counts log records across the batch.
-func (b Batch) Records() int {
+// Len reports the number of log records across the batch, satisfying
+// pipeline.Signal. It also drives the exported-records counter.
+func (b Batch) Len() int {
 	n := 0
 	for _, rl := range b.ResourceLogs {
 		for _, sl := range rl.GetScopeLogs() {
@@ -30,102 +31,16 @@ func (b Batch) Records() int {
 	return n
 }
 
-// Receiver generates Batches and pushes them via emit.
-type Receiver interface {
-	Start(ctx context.Context, emit func(context.Context, Batch) error) error
-	Stop(ctx context.Context) error
-}
+// Pipeline, Receiver, Processor, and Exporter are the log-signal
+// instantiations of the generic pipeline types.
+type (
+	Pipeline  = pipeline.Pipeline[Batch]
+	Receiver  = pipeline.Receiver[Batch]
+	Processor = pipeline.Processor[Batch]
+	Exporter  = pipeline.Exporter[Batch]
+)
 
-// Exporter ships a Batch onward.
-type Exporter interface {
-	Export(ctx context.Context, b Batch) error
-	Close() error
-}
-
-// Pipeline moves log batches from receivers to exporters.
-type Pipeline struct {
-	workers   int
-	receivers []Receiver
-	exporters []Exporter
-	logger    *slog.Logger
-
-	in           chan Batch
-	wg           sync.WaitGroup
-	shutdownOnce sync.Once
-	recordsOut   atomic.Uint64
-}
-
+// NewPipeline builds a log pipeline over the shared generic worker-pool.
 func NewPipeline(workers, queueSize int, logger *slog.Logger) *Pipeline {
-	if workers <= 0 {
-		workers = runtime.NumCPU()
-	}
-	if queueSize <= 0 {
-		queueSize = 10000
-	}
-	return &Pipeline{workers: workers, logger: logger, in: make(chan Batch, queueSize)}
+	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize}, logger)
 }
-
-func (p *Pipeline) AddReceiver(r Receiver) { p.receivers = append(p.receivers, r) }
-func (p *Pipeline) AddExporter(e Exporter) { p.exporters = append(p.exporters, e) }
-
-func (p *Pipeline) Start(ctx context.Context) error {
-	for i := 0; i < p.workers; i++ {
-		p.wg.Add(1)
-		go p.worker(ctx)
-	}
-	emit := func(ctx context.Context, b Batch) error {
-		if b.Empty() {
-			return nil
-		}
-		select {
-		case p.in <- b:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	for _, r := range p.receivers {
-		r := r
-		go func() {
-			if err := r.Start(ctx, emit); err != nil && ctx.Err() == nil {
-				p.logger.Error("log receiver exited with error", "err", err)
-			}
-		}()
-	}
-	return nil
-}
-
-func (p *Pipeline) Shutdown(ctx context.Context) error {
-	var err error
-	p.shutdownOnce.Do(func() {
-		for _, r := range p.receivers {
-			if e := r.Stop(ctx); e != nil {
-				p.logger.Error("log receiver stop error", "err", e)
-			}
-		}
-		close(p.in)
-		p.wg.Wait()
-		for _, e := range p.exporters {
-			if ce := e.Close(); ce != nil {
-				p.logger.Error("log exporter close error", "err", ce)
-				err = ce
-			}
-		}
-	})
-	return err
-}
-
-func (p *Pipeline) worker(ctx context.Context) {
-	defer p.wg.Done()
-	for b := range p.in {
-		for _, e := range p.exporters {
-			if err := e.Export(ctx, b); err != nil && ctx.Err() == nil {
-				p.logger.Error("log exporter error", "err", err)
-			}
-		}
-		p.recordsOut.Add(uint64(b.Records()))
-	}
-}
-
-// RecordsOut returns the count of log records exported.
-func (p *Pipeline) RecordsOut() uint64 { return p.recordsOut.Load() }

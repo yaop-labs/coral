@@ -80,10 +80,10 @@ func (f *filterProcessor) Process(_ context.Context, b model.Batch) (model.Batch
 }
 func (f *filterProcessor) Close() error { return nil }
 
-func startPipeline(t *testing.T, recv *fakeReceiver, exp *capturingExporter, procs ...Processor) (*Pipeline, context.CancelFunc) {
+func startPipeline(t *testing.T, recv *fakeReceiver, exp *capturingExporter, procs ...Processor[model.Batch]) (*Pipeline[model.Batch], context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	p := New(Config{Workers: 2, QueueSize: 16}, slog.Default())
+	p := New[model.Batch](Config{Workers: 2, QueueSize: 16}, slog.Default())
 	p.AddReceiver(recv)
 	for _, pr := range procs {
 		p.AddProcessor(pr)
@@ -176,7 +176,7 @@ func TestPipeline_ShutdownDrainsQueue(t *testing.T) {
 	recv := &fakeReceiver{}
 	exp := &capturingExporter{}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := New(Config{Workers: 1, QueueSize: 100}, slog.Default())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 100}, slog.Default())
 	p.AddReceiver(recv)
 	p.AddExporter(exp)
 	if err := p.Start(ctx); err != nil {
@@ -197,7 +197,7 @@ func TestPipeline_ShutdownDrainsQueue(t *testing.T) {
 }
 
 func TestPipeline_DirectExport(t *testing.T) {
-	p := New(Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 16}, slog.Default())
 	exp := &capturingExporter{}
 	p.AddExporter(exp)
 
@@ -248,7 +248,7 @@ func TestPipeline_MultiExporter_FanOut(t *testing.T) {
 	exp2 := &capturingExporter{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	p := New(Config{Workers: 2, QueueSize: 16}, slog.Default())
+	p := New[model.Batch](Config{Workers: 2, QueueSize: 16}, slog.Default())
 	p.AddReceiver(recv)
 	p.AddExporter(exp1)
 	p.AddExporter(exp2)
@@ -316,7 +316,7 @@ func TestPipeline_ProcessorChain_ShortCircuit(t *testing.T) {
 	second := &countingProcessor{dropAll: false}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	p := New(Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 16}, slog.Default())
 	p.AddReceiver(recv)
 	p.AddProcessor(dropper)
 	p.AddProcessor(second)
@@ -347,7 +347,7 @@ func TestPipeline_ProcessorChain_ShortCircuit(t *testing.T) {
 }
 
 func TestPipeline_ExportFrom_StartsAtProcessorIndex(t *testing.T) {
-	p := New(Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 16}, slog.Default())
 	first := &countingProcessor{}
 	second := &countingProcessor{}
 	exp := &capturingExporter{}
@@ -401,8 +401,32 @@ func TestPipeline_Backpressure_BlocksEmit(t *testing.T) {
 	}
 }
 
+func TestPipeline_Enqueue_CountsDropOnBackpressure(t *testing.T) {
+	// A queue of size 1 with no running workers: the first Enqueue buffers, the
+	// second blocks until its context expires and must be counted as a drop.
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 1}, slog.Default())
+
+	if err := p.Enqueue(context.Background(), model.Batch{Spans: []model.Span{{Name: "buffered"}}}); err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := p.Enqueue(ctx, model.Batch{Spans: []model.Span{{Name: "overflow"}}}); err == nil {
+		t.Fatal("expected backpressure drop to return ctx error")
+	}
+
+	in, dropped, _ := p.Stats()
+	if in != 2 {
+		t.Errorf("batchesIn = %d, want 2", in)
+	}
+	if dropped != 1 {
+		t.Errorf("batchesDropped = %d, want 1", dropped)
+	}
+}
+
 func TestPipeline_Shutdown_Idempotent(t *testing.T) {
-	p := New(Config{Workers: 1, QueueSize: 4}, slog.Default())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
 	exp := &capturingExporter{}
 	p.AddExporter(exp)
 
