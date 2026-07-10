@@ -4,6 +4,9 @@ pipeline:
   workers: 0
   queue_size: 10000
 
+# A single OTLP ingress (contract §2) serves every signal — traces, metrics and
+# logs — on the platform-standard 4317 (gRPC) / 4318 (HTTP) ports, so a stock
+# OTel SDK just works. Legacy trace-only protocols keep their own ports.
 receivers:
   otlp_grpc:
     endpoint: "0.0.0.0:4317"
@@ -48,9 +51,10 @@ processors:
     max_size: 512
     timeout: 1s
 
+# Platform port scheme (contract §2): amber 5317/5318, fathom 6318 (HTTP only).
 exporters:
   - type: amber
-    endpoint: "http://127.0.0.1:8080/v1/traces"
+    endpoint: "http://127.0.0.1:5318/v1/traces"
     timeout: 5s
     retry:
       max_attempts: 3
@@ -59,7 +63,7 @@ exporters:
   # Optional incident-context fan-out. Amber remains durable storage; fathom
   # stores explain indexes and RCA bundles.
   - type: fathom
-    endpoint: "http://127.0.0.1:8099/v1/traces"
+    endpoint: "http://127.0.0.1:6318/v1/traces"
     timeout: 5s
     retry:
       max_attempts: 3
@@ -69,15 +73,9 @@ exporters:
 metrics:
   endpoint: "0.0.0.0:4888"
 
-# Metrics pipeline (wisp → coral → amber), independent of the trace pipeline.
-# Receives OTLP metrics from agents, enriches resource attributes, forwards to
-# amber over OTLP/HTTP (amber ingests metrics over HTTP only).
+# Metrics pipeline (wisp → coral → amber), fed by the shared OTLP ingress above.
+# It enriches resource attributes and forwards to amber over OTLP/HTTP.
 metric_pipeline:
-  receivers:
-    otlp_grpc:
-      endpoint: "0.0.0.0:4319"
-    otlp_http:
-      endpoint: "0.0.0.0:4320"
   processors:
     - type: attributes
       actions:
@@ -86,38 +84,33 @@ metric_pipeline:
           value: coral
   exporters:
     - type: amber
-      endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/metrics
+      endpoint: "http://127.0.0.1:5318" # amber OTLP/HTTP /v1/metrics
       timeout: 5s
       retry:
         max_attempts: 3
         initial_backoff: 100ms
         max_backoff: 5s
     - type: fathom
-      endpoint: "http://127.0.0.1:8099" # fathom OTLP/HTTP /v1/metrics
+      endpoint: "http://127.0.0.1:6318" # fathom OTLP/HTTP /v1/metrics
       timeout: 5s
       retry:
         max_attempts: 3
         initial_backoff: 100ms
         max_backoff: 5s
 
-# Logs pipeline. Amber is the source of truth and must receive logs; fathom is an
-# additional incident-context fan-out.
+# Logs pipeline, fed by the same shared OTLP ingress. Amber is the source of
+# truth and must receive logs; fathom is an additional incident-context fan-out.
 log_pipeline:
-  receivers:
-    otlp_grpc:
-      endpoint: "0.0.0.0:4321"
-    otlp_http:
-      endpoint: "0.0.0.0:4322"
   exporters:
     - type: amber
-      endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/logs
+      endpoint: "http://127.0.0.1:5318" # amber OTLP/HTTP /v1/logs
       timeout: 5s
       retry:
         max_attempts: 3
         initial_backoff: 100ms
         max_backoff: 5s
     - type: fathom
-      endpoint: "http://127.0.0.1:8099" # fathom OTLP/HTTP /v1/logs
+      endpoint: "http://127.0.0.1:6318" # fathom OTLP/HTTP /v1/logs
       timeout: 5s
       retry:
         max_attempts: 3

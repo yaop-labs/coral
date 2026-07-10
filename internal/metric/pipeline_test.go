@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -20,8 +18,8 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
-// TestMetricPipelineEndToEnd wires receiver → attributes(enrich) → amber
-// exporter, then pushes OTLP metrics over gRPC and asserts the fake amber
+// TestMetricPipelineEndToEnd wires attributes(enrich) → amber exporter and
+// pushes an OTLP metric batch through the pipeline, asserting the fake amber
 // received the enriched, intact metrics over HTTP /v1/metrics.
 func TestMetricPipelineEndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -41,7 +39,6 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	}))
 	defer amber.Close()
 
-	recv := NewOTLPReceiver("127.0.0.1:0", "", logger)
 	attrs := NewAttributesProcessor([]AttributeAction{{Action: "upsert", Key: "collector", Value: "coral"}})
 	exp, err := NewAmberExporter(amber.URL, 2*time.Second, RetryPolicy{})
 	if err != nil {
@@ -49,28 +46,11 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	}
 
 	p := NewPipeline(2, 100, logger)
-	p.AddReceiver(recv)
 	p.AddProcessor(attrs)
 	p.AddExporter(exp)
+	defer func() { _ = p.Shutdown(context.Background()) }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := p.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cancel()
-		_ = p.Shutdown(context.Background())
-	}()
-
-	// gRPC client pushes one gauge point.
-	conn, err := grpc.NewClient(recv.GRPCAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	client := colmetricspb.NewMetricsServiceClient(conn)
-
-	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+	batch := Batch{ResourceMetrics: []*metricspb.ResourceMetrics{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "app")}},
 		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
 			Name: "cpu_seconds_total",
@@ -79,20 +59,10 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 			}}}},
 		}}}},
 	}}}
-	if _, err := client.Export(context.Background(), req); err != nil {
-		t.Fatalf("grpc export: %v", err)
-	}
-
-	// Wait for the batch to traverse the pipeline and reach fake amber.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		done := got != nil
-		mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Export runs the processor chain and exporters synchronously in this
+	// goroutine, so the fake amber has been called by the time it returns.
+	if err := p.Export(context.Background(), batch); err != nil {
+		t.Fatalf("export: %v", err)
 	}
 
 	mu.Lock()

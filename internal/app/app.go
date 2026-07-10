@@ -34,12 +34,14 @@ type App struct {
 	metricPipeline *metric.Pipeline // nil unless metric_pipeline is configured
 	logPipeline    *logs.Pipeline   // nil unless log_pipeline is configured
 
-	otlpHTTP   *otlprecv.HTTPReceiver
-	otlpGRPC   *otlprecv.GRPCReceiver
+	// ingress is the unified OTLP endpoint (4317/4318) feeding every signal
+	// pipeline; nil when no OTLP receiver is configured. Legacy Jaeger/Zipkin
+	// trace receivers remain attached directly to the trace pipeline.
+	ingress    *otlprecv.Server
 	startHooks []func(context.Context) error
 	stopHooks  []func(context.Context) error
 
-	ready atomic.Bool // set once all pipelines and receivers are started
+	ready atomic.Bool // set once all pipelines and the ingress are started
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -82,6 +84,7 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		p.AddProcessor(pr)
 	}
 
+	traceActive := overrideExp != nil || len(cfg.Exporters) > 0
 	if overrideExp != nil {
 		p.AddExporter(overrideExp)
 	} else {
@@ -111,20 +114,41 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		logger.Info("log pipeline enabled")
 	}
 
+	a.addIngress(cfg.Receivers, traceActive)
 	return a, nil
+}
+
+// addIngress builds the unified OTLP endpoint from the top-level receiver
+// config, routing each signal to the pipeline that serves it. Signals whose
+// pipeline is absent are left unserved (Unimplemented / 404). A config with
+// only legacy trace receivers builds no ingress.
+func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool) {
+	grpcAddr, httpAddr := "", ""
+	if cfg.OTLPGRPC != nil {
+		grpcAddr = cfg.OTLPGRPC.Endpoint
+	}
+	if cfg.OTLPHTTP != nil {
+		httpAddr = cfg.OTLPHTTP.Endpoint
+	}
+	if grpcAddr == "" && httpAddr == "" {
+		return
+	}
+	sink := otlprecv.Sink{}
+	if traceActive {
+		sink.Traces = a.pipeline.Enqueue
+	}
+	if a.metricPipeline != nil {
+		sink.Metrics = a.metricPipeline.Enqueue
+	}
+	if a.logPipeline != nil {
+		sink.Logs = a.logPipeline.Enqueue
+	}
+	a.ingress = otlprecv.NewServer(grpcAddr, httpAddr, 0, sink)
+	a.logger.Info("otlp ingress enabled", "grpc", grpcAddr, "http", httpAddr)
 }
 
 func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*metric.Pipeline, error) {
 	mp := metric.NewPipeline(base.Workers, base.QueueSize, logger)
-
-	grpcAddr, httpAddr := "", ""
-	if cfg.Receivers.OTLPGRPC != nil {
-		grpcAddr = cfg.Receivers.OTLPGRPC.Endpoint
-	}
-	if cfg.Receivers.OTLPHTTP != nil {
-		httpAddr = cfg.Receivers.OTLPHTTP.Endpoint
-	}
-	mp.AddReceiver(metric.NewOTLPReceiver(grpcAddr, httpAddr, logger))
 
 	for i, pc := range cfg.Processors {
 		switch pc.Type {
@@ -182,15 +206,6 @@ func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, erro
 func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*logs.Pipeline, error) {
 	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger)
 
-	grpcAddr, httpAddr := "", ""
-	if cfg.Receivers.OTLPGRPC != nil {
-		grpcAddr = cfg.Receivers.OTLPGRPC.Endpoint
-	}
-	if cfg.Receivers.OTLPHTTP != nil {
-		httpAddr = cfg.Receivers.OTLPHTTP.Endpoint
-	}
-	lp.AddReceiver(logs.NewOTLPReceiver(grpcAddr, httpAddr, logger))
-
 	for _, exporterCfg := range logExporters(cfg) {
 		exp, err := buildLogExporter(exporterCfg)
 		if err != nil {
@@ -227,20 +242,20 @@ func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
 	}
 }
 
-// OTLPHTTPAddr returns the bound address of the OTLP HTTP receiver (for tests).
+// OTLPHTTPAddr returns the bound address of the OTLP HTTP ingress (for tests).
 func (a *App) OTLPHTTPAddr() string {
-	if a.otlpHTTP == nil {
+	if a.ingress == nil {
 		return ""
 	}
-	return a.otlpHTTP.Addr()
+	return a.ingress.HTTPAddr()
 }
 
-// OTLPGRPCAddr returns the bound address of the OTLP gRPC receiver (for tests).
+// OTLPGRPCAddr returns the bound address of the OTLP gRPC ingress (for tests).
 func (a *App) OTLPGRPCAddr() string {
-	if a.otlpGRPC == nil {
+	if a.ingress == nil {
 		return ""
 	}
-	return a.otlpGRPC.Addr()
+	return a.ingress.GRPCAddr()
 }
 
 func (a *App) Start(ctx context.Context) error {
@@ -262,11 +277,25 @@ func (a *App) Start(ctx context.Context) error {
 	if err := a.pipeline.Start(ctx); err != nil {
 		return err
 	}
+	// The ingress starts last: every pipeline it feeds is already consuming, so
+	// no Enqueue can race a not-yet-started worker pool.
+	if a.ingress != nil {
+		if err := a.ingress.Start(); err != nil {
+			return fmt.Errorf("otlp ingress: %w", err)
+		}
+	}
 	a.ready.Store(true)
 	return nil
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
+	// Stop accepting first: after Stop returns no ingress handler is mid-Enqueue,
+	// so it is safe to close the pipeline queues below.
+	if a.ingress != nil {
+		if err := a.ingress.Stop(ctx); err != nil {
+			a.logger.Error("otlp ingress stop error", "err", err)
+		}
+	}
 	err := a.pipeline.Shutdown(ctx)
 	if a.metricPipeline != nil {
 		if mErr := a.metricPipeline.Shutdown(ctx); mErr != nil && err == nil {
@@ -345,25 +374,10 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 	return mux
 }
 
+// addReceivers attaches the legacy trace receivers (Jaeger/Zipkin) directly to
+// the trace pipeline. OTLP (all signals) is served by the shared ingress, wired
+// separately in addIngress.
 func (a *App) addReceivers(p *pipeline.Pipeline[model.Batch], cfg config.ReceiversConfig, logger *slog.Logger) error {
-	if cfg.OTLPGRPC != nil {
-		r, err := otlprecv.NewGRPC(cfg.OTLPGRPC.Endpoint, 0)
-		if err != nil {
-			return fmt.Errorf("otlp_grpc: %w", err)
-		}
-		a.otlpGRPC = r
-		p.AddReceiver(r)
-		logger.Info("otlp grpc receiver enabled", "endpoint", cfg.OTLPGRPC.Endpoint)
-	}
-	if cfg.OTLPHTTP != nil {
-		r, err := otlprecv.NewHTTP(cfg.OTLPHTTP.Endpoint)
-		if err != nil {
-			return fmt.Errorf("otlp_http: %w", err)
-		}
-		a.otlpHTTP = r
-		p.AddReceiver(r)
-		logger.Info("otlp http receiver enabled", "endpoint", cfg.OTLPHTTP.Endpoint)
-	}
 	if cfg.JaegerThriftUDP != nil {
 		r, err := jaegerrecv.NewThriftUDP(cfg.JaegerThriftUDP.Endpoint, cfg.JaegerThriftUDP.MaxPacketSize)
 		if err != nil {

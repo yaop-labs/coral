@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -20,6 +18,8 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
+// TestLogPipelineEndToEnd pushes an OTLP log batch through the pipeline and
+// asserts the fake fathom received it intact over HTTP /v1/logs.
 func TestLogPipelineEndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -37,52 +37,25 @@ func TestLogPipelineEndToEnd(t *testing.T) {
 	}))
 	defer fathom.Close()
 
-	recv := NewOTLPReceiver("127.0.0.1:0", "", logger)
 	exp, err := NewFathomExporter(fathom.URL, 2*time.Second, RetryPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	p := NewPipeline(2, 100, logger)
-	p.AddReceiver(recv)
 	p.AddExporter(exp)
+	defer func() { _ = p.Shutdown(context.Background()) }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := p.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cancel()
-		_ = p.Shutdown(context.Background())
-	}()
-
-	conn, err := grpc.NewClient(recv.GRPCAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	client := collogspb.NewLogsServiceClient(conn)
-
-	req := &collogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+	batch := Batch{ResourceLogs: []*logspb.ResourceLogs{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "checkout")}},
 		ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
 			TimeUnixNano: 1,
 			Body:         &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "payment timeout"}},
 		}}}},
 	}}}
-	if _, err := client.Export(context.Background(), req); err != nil {
-		t.Fatalf("grpc export: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		done := got != nil
-		mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Export runs the exporters synchronously in this goroutine.
+	if err := p.Export(context.Background(), batch); err != nil {
+		t.Fatalf("export: %v", err)
 	}
 
 	mu.Lock()

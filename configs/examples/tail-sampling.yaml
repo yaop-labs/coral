@@ -13,8 +13,9 @@ processors:
   - type: attributes
     actions:
       - action: add
+        scope: resource
         key: "collector"
-        value: "amber"
+        value: "coral"
   - type: tail_sampling
     decision_wait: 30s
     max_traces: 200000

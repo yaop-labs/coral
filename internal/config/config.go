@@ -177,23 +177,13 @@ type MetricsConfig struct {
 	Endpoint string `yaml:"endpoint"`
 }
 
-// MetricPipelineConfig configures the metrics pipeline: OTLP receivers, enrich
-// processors, and an amber exporter.
+// MetricPipelineConfig configures the metrics pipeline: enrich processors and
+// exporters. Metrics arrive over the shared OTLP ingress (top-level
+// `receivers.otlp_grpc`/`otlp_http`), not a pipeline-local listener.
 type MetricPipelineConfig struct {
-	Receivers  MetricReceiversConfig  `yaml:"receivers"`
 	Processors []ProcessorConfig      `yaml:"processors"`
 	Exporter   MetricExporterConfig   `yaml:"exporter"`
 	Exporters  []MetricExporterConfig `yaml:"exporters"`
-}
-
-// MetricReceiversConfig configures the OTLP metric receivers.
-type MetricReceiversConfig struct {
-	OTLPGRPC *EndpointConfig `yaml:"otlp_grpc"`
-	OTLPHTTP *EndpointConfig `yaml:"otlp_http"`
-}
-
-func (m MetricReceiversConfig) AnyEnabled() bool {
-	return m.OTLPGRPC != nil || m.OTLPHTTP != nil
 }
 
 // MetricExporterConfig configures the amber metrics exporter.
@@ -224,12 +214,28 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
-	traceEnabled := c.Receivers.AnyEnabled()
-	if !traceEnabled && c.MetricPipeline == nil && c.LogPipeline == nil {
-		return fmt.Errorf("at least one receiver is required: enable a trace receiver, metric_pipeline, or log_pipeline")
+	otlpIngress := c.Receivers.OTLPGRPC != nil || c.Receivers.OTLPHTTP != nil
+	anyTraceReceiver := c.Receivers.AnyEnabled()
+	metricActive := c.MetricPipeline != nil
+	logActive := c.LogPipeline != nil
+
+	if !anyTraceReceiver && !metricActive && !logActive {
+		return fmt.Errorf("at least one receiver is required: enable an OTLP or legacy trace receiver, metric_pipeline, or log_pipeline")
 	}
 
-	if traceEnabled {
+	// Metrics and logs are OTLP-only; they ride the shared ingress and cannot be
+	// fed by the legacy (Jaeger/Zipkin) trace receivers.
+	if (metricActive || logActive) && !otlpIngress {
+		return fmt.Errorf("metric_pipeline/log_pipeline require the shared OTLP ingress: set receivers.otlp_grpc or receivers.otlp_http")
+	}
+
+	// The top-level receivers/processors/exporters describe the trace pipeline.
+	// It is engaged when trace processors or exporters are declared; a bare trace
+	// receiver with no metric/log pipeline also implies trace intent and must
+	// carry exporters.
+	traceEngaged := len(c.Exporters) > 0 || len(c.Processors) > 0 ||
+		(anyTraceReceiver && !metricActive && !logActive)
+	if traceEngaged {
 		for i, pc := range c.Processors {
 			if pc.Type == "" {
 				return fmt.Errorf("processors[%d]: type is required", i)
@@ -257,12 +263,12 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.MetricPipeline != nil {
+	if metricActive {
 		if err := c.MetricPipeline.validate(); err != nil {
 			return err
 		}
 	}
-	if c.LogPipeline != nil {
+	if logActive {
 		if err := c.LogPipeline.validate(); err != nil {
 			return err
 		}
@@ -271,9 +277,6 @@ func (c *Config) Validate() error {
 }
 
 func (m *MetricPipelineConfig) validate() error {
-	if !m.Receivers.AnyEnabled() {
-		return fmt.Errorf("metric_pipeline.receivers: at least one OTLP receiver is required")
-	}
 	exporters := m.effectiveExporters()
 	if len(exporters) == 0 {
 		return fmt.Errorf("metric_pipeline.exporter.endpoint is required")
@@ -316,21 +319,12 @@ func (m MetricExporterConfig) metricType() string {
 	return m.Type
 }
 
-// LogPipelineConfig configures the logs pipeline: OTLP receivers and exporters.
+// LogPipelineConfig configures the logs pipeline: exporters (and, once wired,
+// processors). Logs arrive over the shared OTLP ingress (top-level
+// `receivers.otlp_grpc`/`otlp_http`), not a pipeline-local listener.
 type LogPipelineConfig struct {
-	Receivers LogReceiversConfig  `yaml:"receivers"`
 	Exporter  LogExporterConfig   `yaml:"exporter"`
 	Exporters []LogExporterConfig `yaml:"exporters"`
-}
-
-// LogReceiversConfig configures the OTLP log receivers.
-type LogReceiversConfig struct {
-	OTLPGRPC *EndpointConfig `yaml:"otlp_grpc"`
-	OTLPHTTP *EndpointConfig `yaml:"otlp_http"`
-}
-
-func (l LogReceiversConfig) AnyEnabled() bool {
-	return l.OTLPGRPC != nil || l.OTLPHTTP != nil
 }
 
 // LogExporterConfig configures a log exporter.
@@ -342,9 +336,6 @@ type LogExporterConfig struct {
 }
 
 func (l *LogPipelineConfig) validate() error {
-	if !l.Receivers.AnyEnabled() {
-		return fmt.Errorf("log_pipeline.receivers: at least one OTLP receiver is required")
-	}
 	exporters := l.effectiveExporters()
 	if len(exporters) == 0 {
 		return fmt.Errorf("log_pipeline.exporter.endpoint is required")

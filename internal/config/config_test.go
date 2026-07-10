@@ -158,10 +158,10 @@ exporters:
 
 func TestParse_MetricExporters(t *testing.T) {
 	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
 metric_pipeline:
-  receivers:
-    otlp_http:
-      endpoint: "127.0.0.1:4320"
   exporters:
     - type: amber
       endpoint: "http://amber:8080"
@@ -185,10 +185,10 @@ metric_pipeline:
 
 func TestParse_LogExporters(t *testing.T) {
 	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
 log_pipeline:
-  receivers:
-    otlp_http:
-      endpoint: "127.0.0.1:4321"
   exporters:
     - type: fathom
       endpoint: "http://fathom:8099"
@@ -212,10 +212,10 @@ func TestParse_LogExporter_Amber(t *testing.T) {
 	// Logs must be allowed to reach amber (the source of truth); an untyped
 	// exporter defaults to amber. Both used to be rejected by validation.
 	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
 log_pipeline:
-  receivers:
-    otlp_http:
-      endpoint: "127.0.0.1:4321"
   exporters:
     - type: amber
       endpoint: "http://amber:8080"

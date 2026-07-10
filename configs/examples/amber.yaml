@@ -29,7 +29,7 @@ processors:
 
 exporters:
   - type: amber
-    endpoint: "http://amber:8080/v1/traces"
+    endpoint: "http://amber:5318/v1/traces"
     timeout: 5s
     retry:
       max_attempts: 3

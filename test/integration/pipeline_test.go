@@ -5,12 +5,17 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
@@ -106,6 +111,52 @@ func sendTracesHTTP(t *testing.T, addr string, req *coltracepb.ExportTraceServic
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /v1/traces: status %d", resp.StatusCode)
+	}
+}
+
+// startTraceIngress binds a unified OTLP ingress (HTTP only) that feeds p's
+// trace queue, returning the bound HTTP address. It replaces the former
+// per-signal HTTP trace receiver in these lower-level pipeline tests.
+func startTraceIngress(t *testing.T, p *pipeline.Pipeline[model.Batch]) string {
+	t.Helper()
+	ing := otlprecv.NewServer("", "127.0.0.1:0", 0, otlprecv.Sink{Traces: p.Enqueue})
+	if err := ing.Start(); err != nil {
+		t.Fatalf("ingress Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = ing.Stop(ctx)
+	})
+	return ing.HTTPAddr()
+}
+
+// ymlExporter builds a trace ExporterConfig from a YAML mapping (so its Raw node
+// is populated the way the real loader populates it, letting buildExporter
+// decode the amber endpoint).
+func ymlExporter(t *testing.T, doc string) config.ExporterConfig {
+	t.Helper()
+	var ec config.ExporterConfig
+	if err := yaml.Unmarshal([]byte(doc), &ec); err != nil {
+		t.Fatalf("ymlExporter: %v", err)
+	}
+	return ec
+}
+
+// postProtoPath posts a protobuf OTLP message to addr+path and requires 200.
+func postProtoPath(t *testing.T, addr, path string, m proto.Message) {
+	t.Helper()
+	body, err := proto.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+addr+path, "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST %s: status %d", path, resp.StatusCode)
 	}
 }
 
@@ -431,12 +482,6 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 	p.AddProcessor(ts)
 	p.AddExporter(cap)
 
-	httpRecv, err := otlprecv.NewHTTP("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("NewHTTP: %v", err)
-	}
-	p.AddReceiver(httpRecv)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -449,7 +494,7 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 		t.Fatalf("pipeline.Start: %v", err)
 	}
 	ts.Start(ctx)
-	time.Sleep(5 * time.Millisecond) // wait for receiver to bind
+	addr := startTraceIngress(t, p)
 
 	req := makeSpanRequest(
 		[16]byte{80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -457,7 +502,7 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 		"error-op",
 		true,
 	)
-	sendTracesHTTP(t, httpRecv.Addr(), req)
+	sendTracesHTTP(t, addr, req)
 
 	waitFor(t, 500*time.Millisecond, func() bool { return cap.count() >= 1 })
 	if cap.count() == 0 {
@@ -484,12 +529,6 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 	p.AddProcessor(ts)
 	p.AddExporter(cap)
 
-	httpRecv, err := otlprecv.NewHTTP("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("NewHTTP: %v", err)
-	}
-	p.AddReceiver(httpRecv)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -502,7 +541,7 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 		t.Fatalf("pipeline.Start: %v", err)
 	}
 	ts.Start(ctx)
-	time.Sleep(5 * time.Millisecond) // wait for receiver to bind
+	addr := startTraceIngress(t, p)
 
 	req := makeSpanRequest(
 		[16]byte{81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -510,7 +549,7 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 		"clean-op",
 		false,
 	)
-	sendTracesHTTP(t, httpRecv.Addr(), req)
+	sendTracesHTTP(t, addr, req)
 
 	// Wait well beyond decisionWait (30ms) to let the tail sampler decide.
 	time.Sleep(200 * time.Millisecond)
@@ -518,6 +557,82 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 	if cap.count() != 0 {
 		t.Errorf("clean trace must be dropped, got %d spans", cap.count())
 	}
+}
+
+// TestE2E_UnifiedEndpoint_AllSignals is the headline P0-1 check: traces,
+// metrics, and logs sent to the SAME OTLP ports (gRPC and HTTP) each reach their
+// pipeline and are forwarded to amber. Before the unified ingress, metrics on
+// the trace port returned Unimplemented and /v1/metrics returned 404.
+func TestE2E_UnifiedEndpoint_AllSignals(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]int{}
+	amber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer amber.Close()
+
+	cfg := config.Config{
+		Pipeline: config.PipelineConfig{Workers: 2, QueueSize: 256},
+		Receivers: config.ReceiversConfig{
+			OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPGRPC: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+		},
+		Exporters: []config.ExporterConfig{ymlExporter(t, "type: amber\nendpoint: "+amber.URL+"/v1/traces")},
+		MetricPipeline: &config.MetricPipelineConfig{
+			Exporters: []config.MetricExporterConfig{{Type: "amber", Endpoint: amber.URL}},
+		},
+		LogPipeline: &config.LogPipelineConfig{
+			Exporters: []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}},
+		},
+	}
+
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := a.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		sc, scCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scCancel()
+		_ = a.Shutdown(sc)
+	})
+
+	// Traces over gRPC, metrics and logs over HTTP — all to the one ingress.
+	sendTracesGRPC(t, a.OTLPGRPCAddr(), makeSpanRequest(
+		[16]byte{1}, [8]byte{1}, "unified-trace", false))
+	httpAddr := a.OTLPHTTPAddr()
+	postProtoPath(t, httpAddr, "/v1/metrics", &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{{
+			ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+				Name: "unified_metric",
+				Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
+					TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 1},
+				}}}},
+			}}}},
+		}},
+	})
+	postProtoPath(t, httpAddr, "/v1/logs", &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
+				TimeUnixNano: 1,
+				Body:         &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "unified-log"}},
+			}}}},
+		}},
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits["/v1/traces"] >= 1 && hits["/v1/metrics"] >= 1 && hits["/v1/logs"] >= 1
+	})
 }
 
 func TestE2E_MultiReceiver_BothDeliver(t *testing.T) {
