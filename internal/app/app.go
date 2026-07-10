@@ -196,6 +196,7 @@ func traceSizeAdmit(maxSpanBytes int) func(model.Batch) (model.Batch, int, strin
 
 func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*metric.Pipeline, error) {
 	mp := metric.NewPipeline(base.Workers, base.QueueSize, logger)
+	mp.AddProcessor(metric.NewServiceNameProcessor()) // contract §6
 
 	for i, pc := range cfg.Processors {
 		switch pc.Type {
@@ -262,6 +263,7 @@ func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, erro
 
 func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*logs.Pipeline, error) {
 	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger)
+	lp.AddProcessor(logs.NewServiceNameProcessor()) // contract §6
 
 	for i, pc := range cfg.Processors {
 		switch pc.Type {

@@ -747,6 +747,95 @@ func TestE2E_PartialSuccess_OversizedSpanReported(t *testing.T) {
 	}
 }
 
+// TestE2E_ServiceNameEnforced sends a metric and a log with no service.name and
+// asserts coral stamps service.name=unknown_service before forwarding to amber
+// (contract §6), for both the metric and log pipelines.
+func TestE2E_ServiceNameEnforced(t *testing.T) {
+	var mu sync.Mutex
+	var gotM *colmetricspb.ExportMetricsServiceRequest
+	var gotL *collogspb.ExportLogsServiceRequest
+	amber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		switch r.URL.Path {
+		case "/v1/metrics":
+			m := &colmetricspb.ExportMetricsServiceRequest{}
+			_ = proto.Unmarshal(body, m)
+			gotM = m
+		case "/v1/logs":
+			l := &collogspb.ExportLogsServiceRequest{}
+			_ = proto.Unmarshal(body, l)
+			gotL = l
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer amber.Close()
+
+	cfg := config.Config{
+		Pipeline:       config.PipelineConfig{Workers: 1, QueueSize: 64},
+		Receivers:      config.ReceiversConfig{OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"}},
+		MetricPipeline: &config.MetricPipelineConfig{Exporters: []config.MetricExporterConfig{{Type: "amber", Endpoint: amber.URL}}},
+		LogPipeline:    &config.LogPipelineConfig{Exporters: []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}}},
+	}
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := a.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		sc, scCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scCancel()
+		_ = a.Shutdown(sc)
+	})
+
+	// No Resource / service.name on either payload.
+	postProtoPath(t, a.OTLPHTTPAddr(), "/v1/metrics", &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{{
+			ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+				Name: "m",
+				Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
+					TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 1},
+				}}}},
+			}}}},
+		}},
+	})
+	postProtoPath(t, a.OTLPHTTPAddr(), "/v1/logs", &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{TimeUnixNano: 1}}}},
+		}},
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return gotM != nil && gotL != nil
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if v := resourceServiceName(gotM.ResourceMetrics[0].GetResource()); v != "unknown_service" {
+		t.Errorf("metric service.name = %q, want unknown_service", v)
+	}
+	if v := resourceServiceName(gotL.ResourceLogs[0].GetResource()); v != "unknown_service" {
+		t.Errorf("log service.name = %q, want unknown_service", v)
+	}
+}
+
+func resourceServiceName(res *resourcepb.Resource) string {
+	for _, kv := range res.GetAttributes() {
+		if kv.GetKey() == "service.name" {
+			return kv.GetValue().GetStringValue()
+		}
+	}
+	return ""
+}
+
 func TestE2E_MultiReceiver_BothDeliver(t *testing.T) {
 	cfg := baseConfig()
 	cap := &capturingExporter{}
