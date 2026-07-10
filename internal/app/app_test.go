@@ -72,6 +72,9 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if !strings.Contains(body, "coral_batches_in") {
 		t.Errorf("/metrics missing coral_* metric:\n%s", body)
 	}
+	if !strings.Contains(body, "coral_otlp_rejected_spans") {
+		t.Errorf("/metrics missing ingress counters:\n%s", body)
+	}
 	if strings.Contains(body, "collector_") {
 		t.Errorf("/metrics still uses the legacy collector_ prefix:\n%s", body)
 	}

@@ -27,6 +27,10 @@ func (c *Config) setDefaults() {
 // Pipeline moves batches of one signal from receivers through processors to
 // exporters. A single worker-pool implementation serves every signal type
 // (traces, metrics, logs); the element type T carries the signal-specific data.
+//
+// Delivery is at-most-once within coral: there is no spool, so batches are
+// dropped on backpressure or shutdown rather than persisted. End-to-end
+// durability rests on the wisp spool and amber WAL at the edges (contract §1).
 type Pipeline[T Signal] struct {
 	cfg        Config
 	receivers  []Receiver[T]

@@ -436,6 +436,18 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _, recordsOut := a.logPipeline.Stats()
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", recordsOut)
 		}
+		if a.ingress != nil {
+			req, errs, accSpans, accPoints, accRecords := a.ingress.Stats()
+			rejSpans, rejPoints, rejRecords := a.ingress.Rejected()
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_requests counter\ncoral_otlp_requests %d\n", req)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_errors counter\ncoral_otlp_errors %d\n", errs)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_accepted_spans counter\ncoral_otlp_accepted_spans %d\n", accSpans)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_accepted_points counter\ncoral_otlp_accepted_points %d\n", accPoints)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_accepted_records counter\ncoral_otlp_accepted_records %d\n", accRecords)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_spans counter\ncoral_otlp_rejected_spans %d\n", rejSpans)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_points counter\ncoral_otlp_rejected_points %d\n", rejPoints)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_records counter\ncoral_otlp_rejected_records %d\n", rejRecords)
+		}
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
