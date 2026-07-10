@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -633,6 +634,75 @@ func TestE2E_UnifiedEndpoint_AllSignals(t *testing.T) {
 		defer mu.Unlock()
 		return hits["/v1/traces"] >= 1 && hits["/v1/metrics"] >= 1 && hits["/v1/logs"] >= 1
 	})
+}
+
+// TestE2E_LogRedaction drives a secret-bearing log through the app's log
+// pipeline (ingress → redact → amber) and asserts amber receives the scrubbed
+// record — the P1-7 redaction the review deferred to the P0-1 session.
+func TestE2E_LogRedaction(t *testing.T) {
+	var mu sync.Mutex
+	var got *collogspb.ExportLogsServiceRequest
+	amber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		req := &collogspb.ExportLogsServiceRequest{}
+		_ = proto.Unmarshal(body, req)
+		mu.Lock()
+		got = req
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer amber.Close()
+
+	cfg := config.Config{
+		Pipeline:  config.PipelineConfig{Workers: 1, QueueSize: 64},
+		Receivers: config.ReceiversConfig{OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"}},
+		LogPipeline: &config.LogPipelineConfig{
+			Processors: []config.ProcessorConfig{processorCfg(t, "type: redact\ncreds_patterns:\n  - '(?i)authorization|password'")},
+			Exporters:  []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}},
+		},
+	}
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := a.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		sc, scCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scCancel()
+		_ = a.Shutdown(sc)
+	})
+
+	postProtoPath(t, a.OTLPHTTPAddr(), "/v1/logs", &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
+				TimeUnixNano: 1,
+				Attributes: []*commonpb.KeyValue{{Key: "authorization", Value: &commonpb.AnyValue{
+					Value: &commonpb.AnyValue_StringValue{StringValue: "Bearer xyz"}}}},
+				Body: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "password=hunter2"}},
+			}}}},
+		}},
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return got != nil
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	rec := got.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	if got := rec.Body.GetStringValue(); got != "[REDACTED]" {
+		t.Errorf("log body not redacted at amber: %q", got)
+	}
+	if got := rec.Attributes[0].Value.GetStringValue(); got != "[REDACTED]" {
+		t.Errorf("authorization attr not redacted at amber: %q", got)
+	}
 }
 
 func TestE2E_MultiReceiver_BothDeliver(t *testing.T) {

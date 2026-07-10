@@ -114,6 +114,11 @@ type ValidateConfig struct {
 	CredsPatterns []string `yaml:"creds_patterns"`
 }
 
+// RedactConfig configures the redact processor of the metric and log pipelines.
+type RedactConfig struct {
+	CredsPatterns []string `yaml:"creds_patterns"`
+}
+
 // AttributeAction configures one attributes processor action.
 type AttributeAction struct {
 	Action string `yaml:"action"`
@@ -295,7 +300,9 @@ func (m *MetricPipelineConfig) validate() error {
 		if pc.Type == "" {
 			return fmt.Errorf("metric_pipeline.processors[%d]: type is required", i)
 		}
-		if pc.Type != "attributes" {
+		switch pc.Type {
+		case "attributes", "redact":
+		default:
 			return fmt.Errorf("metric_pipeline.processors[%d]: unknown type %q", i, pc.Type)
 		}
 	}
@@ -319,12 +326,13 @@ func (m MetricExporterConfig) metricType() string {
 	return m.Type
 }
 
-// LogPipelineConfig configures the logs pipeline: exporters (and, once wired,
-// processors). Logs arrive over the shared OTLP ingress (top-level
+// LogPipelineConfig configures the logs pipeline: optional processors (redact)
+// and exporters. Logs arrive over the shared OTLP ingress (top-level
 // `receivers.otlp_grpc`/`otlp_http`), not a pipeline-local listener.
 type LogPipelineConfig struct {
-	Exporter  LogExporterConfig   `yaml:"exporter"`
-	Exporters []LogExporterConfig `yaml:"exporters"`
+	Processors []ProcessorConfig   `yaml:"processors"`
+	Exporter   LogExporterConfig   `yaml:"exporter"`
+	Exporters  []LogExporterConfig `yaml:"exporters"`
 }
 
 // LogExporterConfig configures a log exporter.
@@ -348,6 +356,14 @@ func (l *LogPipelineConfig) validate() error {
 		case "amber", "fathom":
 		default:
 			return fmt.Errorf("log_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
+	}
+	for i, pc := range l.Processors {
+		if pc.Type == "" {
+			return fmt.Errorf("log_pipeline.processors[%d]: type is required", i)
+		}
+		if pc.Type != "redact" {
+			return fmt.Errorf("log_pipeline.processors[%d]: unknown type %q", i, pc.Type)
 		}
 	}
 	return nil

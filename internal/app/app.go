@@ -162,6 +162,16 @@ func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineCo
 				actions[j] = metric.AttributeAction{Action: a.Action, Key: a.Key, Value: a.Value}
 			}
 			mp.AddProcessor(metric.NewAttributesProcessor(actions))
+		case "redact":
+			var rc config.RedactConfig
+			if err := pc.Raw.Decode(&rc); err != nil {
+				return nil, fmt.Errorf("processor %d (redact): %w", i, err)
+			}
+			rp, err := metric.NewRedactProcessor(rc.CredsPatterns)
+			if err != nil {
+				return nil, fmt.Errorf("processor %d (redact): %w", i, err)
+			}
+			mp.AddProcessor(rp)
 		default:
 			return nil, fmt.Errorf("processor %d: unknown type %q", i, pc.Type)
 		}
@@ -205,6 +215,23 @@ func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, erro
 
 func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*logs.Pipeline, error) {
 	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger)
+
+	for i, pc := range cfg.Processors {
+		switch pc.Type {
+		case "redact":
+			var rc config.RedactConfig
+			if err := pc.Raw.Decode(&rc); err != nil {
+				return nil, fmt.Errorf("processor %d (redact): %w", i, err)
+			}
+			rp, err := logs.NewRedactProcessor(rc.CredsPatterns)
+			if err != nil {
+				return nil, fmt.Errorf("processor %d (redact): %w", i, err)
+			}
+			lp.AddProcessor(rp)
+		default:
+			return nil, fmt.Errorf("processor %d: unknown type %q", i, pc.Type)
+		}
+	}
 
 	for _, exporterCfg := range logExporters(cfg) {
 		exp, err := buildLogExporter(exporterCfg)

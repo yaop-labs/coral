@@ -82,6 +82,10 @@ metric_pipeline:
         - action: upsert
           key: collector
           value: coral
+    # Scrub credential-bearing metric attributes (contract §8).
+    - type: redact
+      creds_patterns:
+        - '(?i)authorization|password|api[_-]?key|token'
   exporters:
     - type: amber
       endpoint: "http://127.0.0.1:5318" # amber OTLP/HTTP /v1/metrics
@@ -101,6 +105,12 @@ metric_pipeline:
 # Logs pipeline, fed by the same shared OTLP ingress. Amber is the source of
 # truth and must receive logs; fathom is an additional incident-context fan-out.
 log_pipeline:
+  processors:
+    # Logs are the most frequent secret carrier — scrub attributes and body
+    # (contract §8).
+    - type: redact
+      creds_patterns:
+        - '(?i)authorization|password|api[_-]?key|token'
   exporters:
     - type: amber
       endpoint: "http://127.0.0.1:5318" # amber OTLP/HTTP /v1/logs
