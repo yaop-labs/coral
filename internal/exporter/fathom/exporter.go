@@ -14,6 +14,7 @@ import (
 
 	"github.com/yaop-labs/coral/internal/exporter/backoff"
 	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/reef/reefclient"
 )
 
 // Exporter posts OTLP trace requests to fathom's /v1/traces endpoint.
@@ -22,18 +23,23 @@ type Exporter struct {
 	client *http.Client
 }
 
-func New(endpoint string, timeout time.Duration) (*Exporter, error) {
+func New(endpoint string, timeout time.Duration, options ...reefclient.Config) (*Exporter, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("fathom exporter: endpoint required")
 	}
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+	var clientCfg reefclient.Config
+	if len(options) > 0 {
+		clientCfg = options[0]
+	}
+	client, err := newHTTPClient(timeout, clientCfg)
+	if err != nil {
+		return nil, fmt.Errorf("fathom exporter transport: %w", err)
 	}
 	url := strings.TrimRight(endpoint, "/")
 	if !strings.HasSuffix(url, "/v1/traces") {
 		url += "/v1/traces"
 	}
-	return &Exporter{url: url, client: &http.Client{Timeout: timeout}}, nil
+	return &Exporter{url: url, client: client}, nil
 }
 
 func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
@@ -65,3 +71,14 @@ func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
 }
 
 func (e *Exporter) Close() error { return nil }
+
+func newHTTPClient(timeout time.Duration, cfg reefclient.Config) (*http.Client, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	rt, err := reefclient.Transport(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Timeout: timeout, Transport: rt}, nil
+}

@@ -17,7 +17,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -28,6 +30,7 @@ import (
 	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/reef/bearer"
 )
 
 // capture records what each signal sink received.
@@ -302,6 +305,99 @@ func TestIngress_HTTP_PartialSuccess(t *testing.T) {
 		t.Error("partial_success error_message should be set")
 	}
 	waitCounts(t, c, 1, 0, 0) // the one kept span was admitted
+}
+
+func TestIngress_HTTP_JSONResponseMatchesRequestEncoding(t *testing.T) {
+	c := &capture{}
+	sink := c.sink()
+	sink.TraceAdmit = rejectNamed
+	s := startIngress(t, sink)
+	body, err := protojson.Marshal(twoSpanReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+s.HTTPAddr()+"/v1/traces", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("response content-type = %q, want application/json", got)
+	}
+	responseBody, _ := io.ReadAll(resp.Body)
+	var out coltracepb.ExportTraceServiceResponse
+	if err := protojson.Unmarshal(responseBody, &out); err != nil {
+		t.Fatalf("response is not valid OTLP JSON: %v", err)
+	}
+	if got := out.GetPartialSuccess().GetRejectedSpans(); got != 1 {
+		t.Fatalf("rejected spans = %d, want 1", got)
+	}
+}
+
+func TestIngress_HTTP_BearerAuth(t *testing.T) {
+	c := &capture{}
+	s, err := NewSecureServer("", "127.0.0.1:0", 0, c.sink(), SecurityConfig{
+		HTTPAuth: &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "test", Token: "test-token"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.Stop(ctx)
+	})
+	body, _ := proto.Marshal(traceReq())
+	url := "http://" + s.HTTPAddr() + "/v1/traces"
+	resp, err := http.Post(url, "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", resp.StatusCode)
+	}
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestIngress_GRPC_BearerAuth(t *testing.T) {
+	c := &capture{}
+	s, err := NewSecureServer("127.0.0.1:0", "", 0, c.sink(), SecurityConfig{
+		GRPCAuth: &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "test", Token: "test-token"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.Stop(ctx)
+	})
+	conn := dialGRPC(t, s.GRPCAddr())
+	client := coltracepb.NewTraceServiceClient(conn)
+	if _, err := client.Export(context.Background(), traceReq()); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unauthenticated code = %v, want Unauthenticated", status.Code(err))
+	}
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer test-token")
+	if _, err := client.Export(ctx, traceReq()); err != nil {
+		t.Fatalf("authenticated export: %v", err)
+	}
 }
 
 // TestIngress_GRPC_PartialSuccess is the gRPC counterpart.

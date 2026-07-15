@@ -24,6 +24,8 @@ import (
 	jaegerrecv "github.com/yaop-labs/coral/internal/receiver/jaeger"
 	otlprecv "github.com/yaop-labs/coral/internal/receiver/otlp"
 	zipkinrecv "github.com/yaop-labs/coral/internal/receiver/zipkin"
+	"github.com/yaop-labs/reef/reefclient"
+	"github.com/yaop-labs/reef/tlsconf"
 )
 
 // App is a fully wired but unstarted collector.
@@ -114,7 +116,9 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		logger.Info("log pipeline enabled")
 	}
 
-	a.addIngress(cfg.Receivers, traceActive, validateSpanLimit(cfg.Processors))
+	if err := a.addIngress(cfg.Receivers, traceActive, validateSpanLimit(cfg.Processors)); err != nil {
+		return nil, fmt.Errorf("otlp ingress: %w", err)
+	}
 	return a, nil
 }
 
@@ -123,16 +127,23 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 // pipeline is absent are left unserved (Unimplemented / 404). A config with
 // only legacy trace receivers builds no ingress. spanLimit (>0) enables
 // accept-time rejection of oversized spans with a partial_success report.
-func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool, spanLimit int) {
+func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool, spanLimit int) error {
 	grpcAddr, httpAddr := "", ""
+	security := otlprecv.SecurityConfig{}
 	if cfg.OTLPGRPC != nil {
 		grpcAddr = cfg.OTLPGRPC.Endpoint
+		security.GRPCTLS = cfg.OTLPGRPC.TLS
+		security.GRPCAuth = cfg.OTLPGRPC.Auth
+		tlsconf.WarnIfPlaintext(a.logger, "otlp-grpc-receiver", cfg.OTLPGRPC.TLS != nil && cfg.OTLPGRPC.TLS.Enabled)
 	}
 	if cfg.OTLPHTTP != nil {
 		httpAddr = cfg.OTLPHTTP.Endpoint
+		security.HTTPTLS = cfg.OTLPHTTP.TLS
+		security.HTTPAuth = cfg.OTLPHTTP.Auth
+		tlsconf.WarnIfPlaintext(a.logger, "otlp-http-receiver", cfg.OTLPHTTP.TLS != nil && cfg.OTLPHTTP.TLS.Enabled)
 	}
 	if grpcAddr == "" && httpAddr == "" {
-		return
+		return nil
 	}
 	sink := otlprecv.Sink{}
 	if traceActive {
@@ -147,8 +158,13 @@ func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool, spanLimit
 	if a.logPipeline != nil {
 		sink.Logs = a.logPipeline.Enqueue
 	}
-	a.ingress = otlprecv.NewServer(grpcAddr, httpAddr, 0, sink)
+	ingress, err := otlprecv.NewSecureServer(grpcAddr, httpAddr, 0, sink, security)
+	if err != nil {
+		return err
+	}
+	a.ingress = ingress
 	a.logger.Info("otlp ingress enabled", "grpc", grpcAddr, "http", httpAddr)
+	return nil
 }
 
 // validateSpanLimit returns the span-size limit of a configured validate
@@ -226,6 +242,7 @@ func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineCo
 	}
 
 	for _, exporterCfg := range metricExporters(cfg) {
+		warnExporterPlaintext(logger, exporterCfg.Type, "metrics", exporterCfg.TLS)
 		exp, err := buildMetricExporter(exporterCfg)
 		if err != nil {
 			return nil, err
@@ -253,9 +270,9 @@ func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, erro
 	}
 	switch cfg.Type {
 	case "", "amber":
-		return metric.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+		return metric.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
 	case "fathom":
-		return metric.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+		return metric.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
 	default:
 		return nil, fmt.Errorf("metric exporter: unknown type %q", cfg.Type)
 	}
@@ -283,6 +300,7 @@ func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, 
 	}
 
 	for _, exporterCfg := range logExporters(cfg) {
+		warnExporterPlaintext(logger, exporterCfg.Type, "logs", exporterCfg.TLS)
 		exp, err := buildLogExporter(exporterCfg)
 		if err != nil {
 			return nil, err
@@ -310,9 +328,9 @@ func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
 	}
 	switch cfg.Type {
 	case "", "amber":
-		return logs.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+		return logs.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
 	case "fathom":
-		return logs.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry)
+		return logs.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
 	default:
 		return nil, fmt.Errorf("log exporter: unknown type %q", cfg.Type)
 	}
@@ -598,7 +616,8 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 		if err := ec.Raw.Decode(&cfg); err != nil {
 			return nil, err
 		}
-		e, err := amberexp.New(cfg.Endpoint, cfg.Timeout.Std())
+		warnExporterPlaintext(a.logger, "amber", "traces", cfg.TLS)
+		e, err := amberexp.New(cfg.Endpoint, cfg.Timeout.Std(), reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
 		if err != nil {
 			return nil, err
 		}
@@ -613,7 +632,8 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 		if err := ec.Raw.Decode(&cfg); err != nil {
 			return nil, err
 		}
-		e, err := fathomexp.New(cfg.Endpoint, cfg.Timeout.Std())
+		warnExporterPlaintext(a.logger, "fathom", "traces", cfg.TLS)
+		e, err := fathomexp.New(cfg.Endpoint, cfg.Timeout.Std(), reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
 		if err != nil {
 			return nil, err
 		}
@@ -647,4 +667,11 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 	default:
 		return nil, fmt.Errorf("unknown exporter type %q", ec.Type)
 	}
+}
+
+func warnExporterPlaintext(logger *slog.Logger, exporterType, signal string, cfg *tlsconf.ClientConfig) {
+	if exporterType == "" {
+		exporterType = "amber"
+	}
+	tlsconf.WarnIfPlaintext(logger, exporterType+"-"+signal+"-exporter", cfg != nil && cfg.Enabled)
 }

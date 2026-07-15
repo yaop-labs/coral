@@ -14,6 +14,7 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 
 	"github.com/yaop-labs/coral/internal/exporter/backoff"
+	"github.com/yaop-labs/reef/reefclient"
 )
 
 // RetryPolicy is the shared retry policy; classification and backoff live in
@@ -27,18 +28,19 @@ type FathomExporter struct {
 	retry  RetryPolicy
 }
 
-func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*FathomExporter, error) {
+func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy, options ...reefclient.Config) (*FathomExporter, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("fathom log exporter: endpoint required")
 	}
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+	client, err := exporterHTTPClient(timeout, options)
+	if err != nil {
+		return nil, fmt.Errorf("fathom log exporter transport: %w", err)
 	}
 	url := strings.TrimRight(endpoint, "/")
 	if !strings.HasSuffix(url, "/v1/logs") {
 		url += "/v1/logs"
 	}
-	return &FathomExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
+	return &FathomExporter{url: url, client: client, retry: retry}, nil
 }
 
 func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
@@ -75,4 +77,19 @@ func post(ctx context.Context, client *http.Client, url, who string, body []byte
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+func exporterHTTPClient(timeout time.Duration, options []reefclient.Config) (*http.Client, error) {
+	var cfg reefclient.Config
+	if len(options) > 0 {
+		cfg = options[0]
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	rt, err := reefclient.Transport(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Timeout: timeout, Transport: rt}, nil
 }

@@ -13,7 +13,7 @@ import (
 func validConfig() Config {
 	return Config{
 		Receivers: ReceiversConfig{
-			OTLPGRPC: &EndpointConfig{Endpoint: "127.0.0.1:4317"},
+			OTLPGRPC: &OTLPEndpointConfig{Endpoint: "127.0.0.1:4317"},
 		},
 		Exporters: []ExporterConfig{{Type: "devnull"}},
 	}
@@ -412,5 +412,74 @@ func TestValidate_HeadSamplingRemoved(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "head_sampling was removed") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestParse_RejectsRemovedPipelineLocalReceivers(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+metric_pipeline:
+  receivers:
+    otlp_http:
+      endpoint: "127.0.0.1:4320"
+  exporters:
+    - type: amber
+      endpoint: "http://amber:5318"
+`)
+	_, err := Parse(doc)
+	if err == nil {
+		t.Fatal("expected old metric_pipeline.receivers to fail loudly")
+	}
+	if !strings.Contains(err.Error(), "field receivers not found") {
+		t.Fatalf("unexpected migration error: %v", err)
+	}
+}
+
+func TestParse_ReefSecuritySchema(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_grpc:
+    endpoint: "127.0.0.1:4317"
+    tls:
+      enabled: true
+      cert_file: server.crt
+      key_file: server.key
+      min_version: "1.3"
+    auth:
+      bearer:
+        - name: wisp
+          token_file: ingress.token
+exporters:
+  - type: devnull
+metric_pipeline:
+  exporters:
+    - type: amber
+      endpoint: https://amber:5318
+      tls:
+        enabled: true
+        ca_file: ca.crt
+        server_name: amber
+      auth:
+        token_file: amber.token
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	grpc := cfg.Receivers.OTLPGRPC
+	if grpc == nil || grpc.TLS == nil || !grpc.TLS.Enabled {
+		t.Fatal("receiver Reef TLS config was not decoded")
+	}
+	if grpc.Auth == nil || len(grpc.Auth.Bearer) != 1 || grpc.Auth.Bearer[0].Name != "wisp" {
+		t.Fatalf("receiver Reef auth config = %#v", grpc.Auth)
+	}
+	exp := cfg.MetricPipeline.Exporters[0]
+	if exp.TLS == nil || exp.TLS.ServerName != "amber" {
+		t.Fatalf("exporter Reef TLS config = %#v", exp.TLS)
+	}
+	if exp.Auth == nil || exp.Auth.TokenFile != "amber.token" {
+		t.Fatalf("exporter Reef auth config = %#v", exp.Auth)
 	}
 }

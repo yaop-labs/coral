@@ -80,8 +80,8 @@ func baseConfig() config.Config {
 	return config.Config{
 		Pipeline: config.PipelineConfig{Workers: 2, QueueSize: 256},
 		Receivers: config.ReceiversConfig{
-			OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
-			OTLPGRPC: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPHTTP: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPGRPC: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
 		},
 		Exporters: []config.ExporterConfig{{Type: "devnull"}},
 	}
@@ -578,8 +578,8 @@ func TestE2E_UnifiedEndpoint_AllSignals(t *testing.T) {
 	cfg := config.Config{
 		Pipeline: config.PipelineConfig{Workers: 2, QueueSize: 256},
 		Receivers: config.ReceiversConfig{
-			OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
-			OTLPGRPC: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPHTTP: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPGRPC: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
 		},
 		Exporters: []config.ExporterConfig{ymlExporter(t, "type: amber\nendpoint: "+amber.URL+"/v1/traces")},
 		MetricPipeline: &config.MetricPipelineConfig{
@@ -655,7 +655,7 @@ func TestE2E_LogRedaction(t *testing.T) {
 
 	cfg := config.Config{
 		Pipeline:  config.PipelineConfig{Workers: 1, QueueSize: 64},
-		Receivers: config.ReceiversConfig{OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"}},
+		Receivers: config.ReceiversConfig{OTLPHTTP: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"}},
 		LogPipeline: &config.LogPipelineConfig{
 			Processors: []config.ProcessorConfig{processorCfg(t, "type: redact\ncreds_patterns:\n  - '(?i)authorization|password'")},
 			Exporters:  []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}},
@@ -774,7 +774,7 @@ func TestE2E_ServiceNameEnforced(t *testing.T) {
 
 	cfg := config.Config{
 		Pipeline:       config.PipelineConfig{Workers: 1, QueueSize: 64},
-		Receivers:      config.ReceiversConfig{OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"}},
+		Receivers:      config.ReceiversConfig{OTLPHTTP: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"}},
 		MetricPipeline: &config.MetricPipelineConfig{Exporters: []config.MetricExporterConfig{{Type: "amber", Endpoint: amber.URL}}},
 		LogPipeline:    &config.LogPipelineConfig{Exporters: []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}}},
 	}
