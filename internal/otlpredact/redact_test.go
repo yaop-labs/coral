@@ -47,3 +47,33 @@ func TestRedactor_DisabledWhenNoPatterns(t *testing.T) {
 		t.Error("Enabled() should be false with no patterns")
 	}
 }
+
+func TestRedactKeyValues_RecursesIntoCompositeValues(t *testing.T) {
+	r, err := New([]string{`(?i)password|secret-\d+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attrs := []*commonpb.KeyValue{{
+		Key: "payload",
+		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{
+			KvlistValue: &commonpb.KeyValueList{Values: []*commonpb.KeyValue{
+				kv("password", "hunter2"),
+				{Key: "items", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{
+					ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{
+						{Value: &commonpb.AnyValue_StringValue{StringValue: "secret-42"}},
+					}},
+				}}},
+			}},
+		}},
+	}}
+	if n := r.RedactKeyValues(attrs); n != 1 {
+		t.Fatalf("redacted top-level attributes = %d, want 1", n)
+	}
+	nested := attrs[0].GetValue().GetKvlistValue().GetValues()
+	if got := nested[0].GetValue().GetStringValue(); got != RedactedValue {
+		t.Fatalf("nested key value = %q, want redacted", got)
+	}
+	if got := nested[1].GetValue().GetArrayValue().GetValues()[0].GetStringValue(); got != RedactedValue {
+		t.Fatalf("nested array value = %q, want redacted", got)
+	}
+}

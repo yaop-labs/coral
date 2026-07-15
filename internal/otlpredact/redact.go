@@ -54,12 +54,42 @@ func (r *Redactor) RedactKeyValues(attrs []*commonpb.KeyValue) int {
 		if kv == nil {
 			continue
 		}
-		if r.MatchString(kv.GetKey()) || r.MatchString(kv.GetValue().GetStringValue()) {
+		if r.MatchString(kv.GetKey()) {
 			kv.Value = RedactedAny()
+			n++
+			continue
+		}
+		if r.RedactValue(kv.GetValue()) {
 			n++
 		}
 	}
 	return n
+}
+
+// RedactValue recursively scrubs matching strings and keys from an OTLP
+// AnyValue. Attributes and structured log bodies may contain ArrayValue and
+// KeyValueList nodes, so inspecting only GetStringValue would leak secrets
+// nested below the first level.
+func (r *Redactor) RedactValue(v *commonpb.AnyValue) bool {
+	if v == nil {
+		return false
+	}
+	switch x := v.GetValue().(type) {
+	case *commonpb.AnyValue_StringValue:
+		if r.MatchString(x.StringValue) {
+			v.Value = RedactedAny().Value
+			return true
+		}
+	case *commonpb.AnyValue_ArrayValue:
+		changed := false
+		for _, item := range x.ArrayValue.GetValues() {
+			changed = r.RedactValue(item) || changed
+		}
+		return changed
+	case *commonpb.AnyValue_KvlistValue:
+		return r.RedactKeyValues(x.KvlistValue.GetValues()) > 0
+	}
+	return false
 }
 
 // RedactedAny returns a fresh AnyValue holding the redaction placeholder.
