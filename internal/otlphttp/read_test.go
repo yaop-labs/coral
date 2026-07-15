@@ -103,6 +103,23 @@ func TestReadBody_TooLarge(t *testing.T) {
 	}
 }
 
+func TestReadBody_DecompressedBodyTooLarge(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(strings.Repeat("a", 2048)))
+	_ = gz.Close()
+	req := httptest.NewRequest(http.MethodPost, "/v1/traces", &buf)
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	if _, _, ok := ReadBody(w, req, 1024); ok {
+		t.Fatal("expected rejection of oversized decompressed body")
+	}
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code = %d, want 413", w.Code)
+	}
+}
+
 func TestReadBody_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/traces", nil)
 	w := httptest.NewRecorder()

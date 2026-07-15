@@ -282,6 +282,76 @@ func TestPipeline_MultiExporter_FanOut(t *testing.T) {
 	p.Shutdown(context.Background())
 }
 
+type blockingExporter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (e *blockingExporter) Export(ctx context.Context, _ model.Batch) error {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-e.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *blockingExporter) Close() error { return nil }
+
+func TestPipeline_SlowExporterDoesNotBlockFanOut(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
+	slow := &blockingExporter{started: make(chan struct{}), release: make(chan struct{})}
+	fast := &capturingExporter{}
+	p.AddExporter(slow)
+	p.AddExporter(fast)
+	if err := p.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(context.Background(), model.Batch{Spans: []model.Span{{Name: "fanout"}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-slow.started:
+	case <-time.After(time.Second):
+		t.Fatal("slow exporter was not called")
+	}
+	deadline := time.Now().Add(time.Second)
+	for fast.Len() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if fast.Len() != 1 {
+		t.Fatal("fast exporter was blocked by the slow exporter")
+	}
+	close(slow.release)
+	cancel()
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPipeline_ShutdownUnblocksEnqueueWithoutPanic(t *testing.T) {
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 1}, slog.Default())
+	b := model.Batch{Spans: []model.Span{{Name: "queued"}}}
+	if err := p.Enqueue(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan error, 1)
+	go func() { blocked <- p.Enqueue(context.Background(), b) }()
+	time.Sleep(5 * time.Millisecond)
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-blocked; !errors.Is(err, errPipelineStopped) {
+		t.Fatalf("blocked Enqueue error = %v, want pipeline stopped", err)
+	}
+	if err := p.Enqueue(context.Background(), b); !errors.Is(err, errPipelineStopped) {
+		t.Fatalf("Enqueue after shutdown error = %v, want pipeline stopped", err)
+	}
+}
+
 // countingProcessor counts calls and optionally returns empty batch.
 // All fields are guarded by mu so the worker goroutine and test goroutine
 // can safely access them concurrently.

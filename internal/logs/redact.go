@@ -35,9 +35,7 @@ func (p *RedactProcessor) Process(_ context.Context, b Batch) (Batch, error) {
 			}
 			for _, rec := range sl.GetLogRecords() {
 				p.r.RedactKeyValues(rec.Attributes)
-				if s := rec.GetBody().GetStringValue(); s != "" && p.r.MatchString(s) {
-					rec.Body = otlpredact.RedactedAny()
-				}
+				p.r.RedactValue(rec.GetBody())
 			}
 		}
 	}

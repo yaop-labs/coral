@@ -383,6 +383,7 @@ func (a *App) Start(ctx context.Context) error {
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
+	a.ready.Store(false)
 	// Stop accepting first: after Stop returns no ingress handler is mid-Enqueue,
 	// so it is safe to close the pipeline queues below.
 	if a.ingress != nil {
@@ -446,13 +447,16 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_in counter\ncoral_batches_in %d\n", batchesIn)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_dropped counter\ncoral_batches_dropped %d\n", batchesDropped)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_spans_out counter\ncoral_spans_out %d\n", spansOut)
+		_, _ = fmt.Fprintf(w, "# TYPE coral_trace_exporter_batches_dropped counter\ncoral_trace_exporter_batches_dropped %d\n", p.ExporterDrops())
 		if a.metricPipeline != nil {
 			_, _, pointsOut := a.metricPipeline.Stats()
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", pointsOut)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_exporter_batches_dropped counter\ncoral_metric_exporter_batches_dropped %d\n", a.metricPipeline.ExporterDrops())
 		}
 		if a.logPipeline != nil {
 			_, _, recordsOut := a.logPipeline.Stats()
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", recordsOut)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_log_exporter_batches_dropped counter\ncoral_log_exporter_batches_dropped %d\n", a.logPipeline.ExporterDrops())
 		}
 		if a.ingress != nil {
 			req, errs, accSpans, accPoints, accRecords := a.ingress.Stats()

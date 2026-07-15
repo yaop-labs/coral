@@ -48,7 +48,10 @@ func ReadBody(w http.ResponseWriter, r *http.Request, maxBytes int64) (body []by
 			return nil, 0, false
 		}
 		defer gz.Close()
-		reader = io.LimitReader(gz, maxBytes) // guard against gzip bombs
+		// Read one byte past the limit so an oversized decompressed payload is
+		// reported as 413 instead of being silently truncated and later rejected
+		// as malformed protobuf/JSON.
+		reader = io.LimitReader(gz, maxBytes+1)
 	default:
 		http.Error(w, "unsupported content-encoding", http.StatusUnsupportedMediaType)
 		return nil, 0, false
@@ -62,6 +65,10 @@ func ReadBody(w http.ResponseWriter, r *http.Request, maxBytes int64) (body []by
 			return nil, 0, false
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, 0, false
+	}
+	if int64(len(body)) > maxBytes {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return nil, 0, false
 	}
 	return body, enc, true

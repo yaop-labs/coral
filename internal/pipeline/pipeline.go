@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -38,12 +39,22 @@ type Pipeline[T Signal] struct {
 	exporters  []Exporter[T]
 	logger     *slog.Logger
 
-	in           chan T
-	wg           sync.WaitGroup
-	shutdownOnce sync.Once
+	in             chan T
+	wg             sync.WaitGroup
+	exporterWG     sync.WaitGroup
+	exporterLanes  []chan T
+	shutdownOnce   sync.Once
+	started        atomic.Bool
+	stopped        atomic.Bool
+	enqueueStopped atomic.Bool
+	enqueueMu      sync.Mutex
+	enqueueWG      sync.WaitGroup
+	stopEnqueue    chan struct{}
+	exportMu       sync.RWMutex
 
 	batchesIn      atomic.Uint64
 	batchesDropped atomic.Uint64
+	exporterDrops  atomic.Uint64
 	itemsOut       atomic.Uint64
 }
 
@@ -52,11 +63,14 @@ type Pipeline[T Signal] struct {
 func New[T Signal](cfg Config, logger *slog.Logger) *Pipeline[T] {
 	cfg.setDefaults()
 	return &Pipeline[T]{
-		cfg:    cfg,
-		logger: logger,
-		in:     make(chan T, cfg.QueueSize),
+		cfg:         cfg,
+		logger:      logger,
+		in:          make(chan T, cfg.QueueSize),
+		stopEnqueue: make(chan struct{}),
 	}
 }
+
+var errPipelineStopped = errors.New("pipeline stopped")
 
 func (p *Pipeline[T]) AddReceiver(r Receiver[T])    { p.receivers = append(p.receivers, r) }
 func (p *Pipeline[T]) AddProcessor(pr Processor[T]) { p.processors = append(p.processors, pr) }
@@ -70,10 +84,22 @@ func (p *Pipeline[T]) Enqueue(ctx context.Context, b T) error {
 	if b.Len() == 0 {
 		return nil
 	}
+	p.enqueueMu.Lock()
+	if p.enqueueStopped.Load() {
+		p.enqueueMu.Unlock()
+		return errPipelineStopped
+	}
+	p.enqueueWG.Add(1)
+	p.enqueueMu.Unlock()
+	defer p.enqueueWG.Done()
+
 	p.batchesIn.Add(1)
 	select {
 	case p.in <- b:
 		return nil
+	case <-p.stopEnqueue:
+		p.batchesDropped.Add(1)
+		return errPipelineStopped
 	case <-ctx.Done():
 		p.batchesDropped.Add(1)
 		return ctx.Err()
@@ -82,6 +108,23 @@ func (p *Pipeline[T]) Enqueue(ctx context.Context, b T) error {
 
 // Start launches the worker pool and all receivers.
 func (p *Pipeline[T]) Start(ctx context.Context) error {
+	for range p.exporters {
+		p.exporterLanes = append(p.exporterLanes, make(chan T, p.cfg.QueueSize))
+	}
+	for i, e := range p.exporters {
+		lane := p.exporterLanes[i]
+		p.exporterWG.Add(1)
+		go func() {
+			defer p.exporterWG.Done()
+			for b := range lane {
+				if err := e.Export(ctx, b); err != nil && ctx.Err() == nil {
+					p.logger.Error("exporter error", "err", err)
+				}
+			}
+		}()
+	}
+	p.started.Store(true)
+
 	for i := 0; i < p.cfg.Workers; i++ {
 		p.wg.Add(1)
 		go p.worker(ctx)
@@ -102,6 +145,12 @@ func (p *Pipeline[T]) Start(ctx context.Context) error {
 func (p *Pipeline[T]) Shutdown(ctx context.Context) error {
 	var err error
 	p.shutdownOnce.Do(func() {
+		p.enqueueMu.Lock()
+		p.enqueueStopped.Store(true)
+		close(p.stopEnqueue)
+		p.enqueueMu.Unlock()
+		p.enqueueWG.Wait()
+
 		for _, r := range p.receivers {
 			if stopErr := r.Stop(ctx); stopErr != nil {
 				p.logger.Error("receiver stop error", "err", stopErr)
@@ -116,6 +165,14 @@ func (p *Pipeline[T]) Shutdown(ctx context.Context) error {
 				p.logger.Error("processor close error", "err", closeErr)
 			}
 		}
+		p.exportMu.Lock()
+		p.stopped.Store(true)
+		p.started.Store(false)
+		for _, lane := range p.exporterLanes {
+			close(lane)
+		}
+		p.exportMu.Unlock()
+		p.exporterWG.Wait()
 		for _, e := range p.exporters {
 			if closeErr := e.Close(); closeErr != nil {
 				p.logger.Error("exporter close error", "err", closeErr)
@@ -163,9 +220,30 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 			return nil
 		}
 	}
-	for _, e := range p.exporters {
-		if err := e.Export(ctx, b); err != nil {
-			p.logger.Error("exporter error", "err", err)
+	p.exportMu.RLock()
+	defer p.exportMu.RUnlock()
+	if p.stopped.Load() {
+		return errPipelineStopped
+	}
+	if p.started.Load() {
+		// Each exporter owns a bounded delivery lane. A retrying or unavailable
+		// destination can fill and drop its own lane, but cannot delay or block
+		// delivery to the other fan-out destinations.
+		for i, lane := range p.exporterLanes {
+			select {
+			case lane <- b:
+			default:
+				p.exporterDrops.Add(1)
+				p.logger.Error("exporter queue full; batch dropped", "exporter", i)
+			}
+		}
+	} else {
+		// Direct Export before Start remains synchronous for processors/tests that
+		// use the pipeline as a simple composition primitive.
+		for _, e := range p.exporters {
+			if err := e.Export(ctx, b); err != nil {
+				p.logger.Error("exporter error", "err", err)
+			}
 		}
 	}
 	p.itemsOut.Add(uint64(b.Len()))
@@ -177,3 +255,7 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 func (p *Pipeline[T]) Stats() (batchesIn, batchesDropped, itemsOut uint64) {
 	return p.batchesIn.Load(), p.batchesDropped.Load(), p.itemsOut.Load()
 }
+
+// ExporterDrops returns batches dropped from an individual exporter lane
+// because that destination remained slower than the pipeline.
+func (p *Pipeline[T]) ExporterDrops() uint64 { return p.exporterDrops.Load() }
