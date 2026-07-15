@@ -14,6 +14,8 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 
 	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/reef/bearer"
+	"github.com/yaop-labs/reef/reefclient"
 )
 
 func attr(kvs []*commonpb.KeyValue, key string) *commonpb.AnyValue {
@@ -102,6 +104,25 @@ func TestAmberExporter_ServerError(t *testing.T) {
 func TestAmberExporter_EmptyEndpoint(t *testing.T) {
 	if _, err := New("", 0); err == nil {
 		t.Fatal("expected error for empty endpoint")
+	}
+}
+
+func TestAmberExporter_SendsBearerToken(t *testing.T) {
+	var authorization string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	exp, err := New(srv.URL, time.Second, reefclient.Config{Auth: &bearer.ClientConfig{Token: "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exp.Export(context.Background(), model.Batch{Spans: []model.Span{{Name: "x"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if authorization != "Bearer secret" {
+		t.Fatalf("authorization = %q", authorization)
 	}
 }
 

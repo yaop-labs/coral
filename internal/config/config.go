@@ -1,10 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/yaop-labs/reef/bearer"
+	"github.com/yaop-labs/reef/tlsconf"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,17 +52,24 @@ type PipelineConfig struct {
 
 // ReceiversConfig configures trace receivers.
 type ReceiversConfig struct {
-	OTLPGRPC         *EndpointConfig `yaml:"otlp_grpc"`
-	OTLPHTTP         *EndpointConfig `yaml:"otlp_http"`
-	JaegerThriftHTTP *EndpointConfig `yaml:"jaeger_thrift_http"`
-	JaegerThriftUDP  *UDPConfig      `yaml:"jaeger_thrift_udp"`
-	JaegerThriftTCP  *EndpointConfig `yaml:"jaeger_thrift_tcp"`
-	ZipkinHTTP       *EndpointConfig `yaml:"zipkin_http"`
+	OTLPGRPC         *OTLPEndpointConfig `yaml:"otlp_grpc"`
+	OTLPHTTP         *OTLPEndpointConfig `yaml:"otlp_http"`
+	JaegerThriftHTTP *EndpointConfig     `yaml:"jaeger_thrift_http"`
+	JaegerThriftUDP  *UDPConfig          `yaml:"jaeger_thrift_udp"`
+	JaegerThriftTCP  *EndpointConfig     `yaml:"jaeger_thrift_tcp"`
+	ZipkinHTTP       *EndpointConfig     `yaml:"zipkin_http"`
 }
 
 // EndpointConfig configures a TCP or HTTP listener.
 type EndpointConfig struct {
 	Endpoint string `yaml:"endpoint"`
+}
+
+// OTLPEndpointConfig adds transport security to an OTLP listener.
+type OTLPEndpointConfig struct {
+	Endpoint string                `yaml:"endpoint"`
+	TLS      *tlsconf.ServerConfig `yaml:"tls"`
+	Auth     *bearer.ServerConfig  `yaml:"auth"`
 }
 
 // UDPConfig configures a UDP listener.
@@ -156,9 +166,11 @@ type TailSamplingConfig struct {
 
 // AmberConfig configures the Amber exporter.
 type AmberConfig struct {
-	Endpoint string      `yaml:"endpoint"`
-	Timeout  Duration    `yaml:"timeout"`
-	Retry    RetryConfig `yaml:"retry"`
+	Endpoint string                `yaml:"endpoint"`
+	Timeout  Duration              `yaml:"timeout"`
+	Retry    RetryConfig           `yaml:"retry"`
+	TLS      *tlsconf.ClientConfig `yaml:"tls"`
+	Auth     *bearer.ClientConfig  `yaml:"auth"`
 }
 
 // S3Config configures the S3 exporter.
@@ -193,10 +205,12 @@ type MetricPipelineConfig struct {
 
 // MetricExporterConfig configures the amber metrics exporter.
 type MetricExporterConfig struct {
-	Type     string      `yaml:"type"`
-	Endpoint string      `yaml:"endpoint"`
-	Timeout  Duration    `yaml:"timeout"`
-	Retry    RetryConfig `yaml:"retry"`
+	Type     string                `yaml:"type"`
+	Endpoint string                `yaml:"endpoint"`
+	Timeout  Duration              `yaml:"timeout"`
+	Retry    RetryConfig           `yaml:"retry"`
+	TLS      *tlsconf.ClientConfig `yaml:"tls"`
+	Auth     *bearer.ClientConfig  `yaml:"auth"`
 }
 
 func Load(path string) (Config, error) {
@@ -209,7 +223,9 @@ func Load(path string) (Config, error) {
 
 func Parse(data []byte) (Config, error) {
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("config: parse yaml: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -337,10 +353,12 @@ type LogPipelineConfig struct {
 
 // LogExporterConfig configures a log exporter.
 type LogExporterConfig struct {
-	Type     string      `yaml:"type"`
-	Endpoint string      `yaml:"endpoint"`
-	Timeout  Duration    `yaml:"timeout"`
-	Retry    RetryConfig `yaml:"retry"`
+	Type     string                `yaml:"type"`
+	Endpoint string                `yaml:"endpoint"`
+	Timeout  Duration              `yaml:"timeout"`
+	Retry    RetryConfig           `yaml:"retry"`
+	TLS      *tlsconf.ClientConfig `yaml:"tls"`
+	Auth     *bearer.ClientConfig  `yaml:"auth"`
 }
 
 func (l *LogPipelineConfig) validate() error {

@@ -15,8 +15,8 @@ func testConfig() config.Config {
 	return config.Config{
 		Pipeline: config.PipelineConfig{Workers: 1, QueueSize: 64},
 		Receivers: config.ReceiversConfig{
-			OTLPGRPC: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
-			OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPGRPC: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPHTTP: &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
 		},
 		Exporters: []config.ExporterConfig{{Type: "devnull"}},
 	}
@@ -156,8 +156,8 @@ func TestApp_AllReceivers(t *testing.T) {
 	cfg := config.Config{
 		Pipeline: config.PipelineConfig{Workers: 1, QueueSize: 16},
 		Receivers: config.ReceiversConfig{
-			OTLPGRPC:        &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
-			OTLPHTTP:        &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPGRPC:        &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPHTTP:        &config.OTLPEndpointConfig{Endpoint: "127.0.0.1:0"},
 			JaegerThriftUDP: &config.UDPConfig{Endpoint: "127.0.0.1:0"},
 			JaegerThriftTCP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
 			ZipkinHTTP:      &config.EndpointConfig{Endpoint: "127.0.0.1:0"},

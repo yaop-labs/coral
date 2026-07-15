@@ -2,6 +2,8 @@ package otlp
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -23,6 +26,9 @@ import (
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/coral/internal/otlphttp"
+	"github.com/yaop-labs/reef/bearer"
+	"github.com/yaop-labs/reef/grpcreef"
+	"github.com/yaop-labs/reef/tlsconf"
 )
 
 const defaultMaxRecvBytes = 16 << 20
@@ -56,11 +62,18 @@ type Server struct {
 	httpAddr string
 	maxRecv  int
 	sink     Sink
+	grpcOpts []grpc.ServerOption
+	httpTLS  *tls.Config
+	httpAuth func(http.Handler) http.Handler
 
-	grpcSrv *grpc.Server
-	httpSrv *http.Server
-	grpcLn  net.Listener
-	httpLn  net.Listener
+	grpcSrv       *grpc.Server
+	httpSrv       *http.Server
+	grpcLn        net.Listener
+	httpLn        net.Listener
+	httpCancel    context.CancelFunc
+	httpWG        sync.WaitGroup
+	httpHandlerMu sync.Mutex
+	httpStopping  bool
 
 	mu    sync.Mutex
 	ready chan struct{} // closed once listeners are bound (or bind failed)
@@ -78,16 +91,49 @@ type Server struct {
 // NewServer builds an ingress bound to grpcAddr and/or httpAddr (either may be
 // empty to disable that transport). sink selects which signals are served.
 func NewServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink) *Server {
+	s, _ := newServer(grpcAddr, httpAddr, maxRecvBytes, sink, SecurityConfig{})
+	return s
+}
+
+type SecurityConfig struct {
+	GRPCTLS  *tlsconf.ServerConfig
+	HTTPTLS  *tlsconf.ServerConfig
+	GRPCAuth *bearer.ServerConfig
+	HTTPAuth *bearer.ServerConfig
+}
+
+// NewSecureServer builds an ingress with optional TLS/mTLS and bearer-token
+// authentication independently configurable for gRPC and HTTP.
+func NewSecureServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security SecurityConfig) (*Server, error) {
+	return newServer(grpcAddr, httpAddr, maxRecvBytes, sink, security)
+}
+
+func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security SecurityConfig) (*Server, error) {
 	if maxRecvBytes <= 0 {
 		maxRecvBytes = defaultMaxRecvBytes
+	}
+	grpcOptions, err := grpcreef.ServerOptions(security.GRPCTLS, security.GRPCAuth)
+	if err != nil {
+		return nil, fmt.Errorf("grpc: %w", err)
+	}
+	httpTLS, err := tlsconf.Server(security.HTTPTLS)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	httpAuth, err := bearer.Require(security.HTTPAuth)
+	if err != nil {
+		return nil, fmt.Errorf("http auth: %w", err)
 	}
 	return &Server{
 		grpcAddr: grpcAddr,
 		httpAddr: httpAddr,
 		maxRecv:  maxRecvBytes,
 		sink:     sink,
+		grpcOpts: grpcOptions,
+		httpTLS:  httpTLS,
+		httpAuth: httpAuth,
 		ready:    make(chan struct{}),
-	}
+	}, nil
 }
 
 // Start binds the listeners and begins serving, returning once both are bound
@@ -96,12 +142,30 @@ func NewServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink) *Server {
 func (s *Server) Start() error {
 	defer close(s.ready)
 
+	// Bind every configured listener before starting either server. This makes
+	// startup atomic: a failure on the second port cannot leave the first one
+	// serving in the background.
+	var grpcLn, httpLn net.Listener
+	var err error
 	if s.grpcAddr != "" {
-		ln, err := net.Listen("tcp", s.grpcAddr)
+		grpcLn, err = net.Listen("tcp", s.grpcAddr)
 		if err != nil {
 			return err
 		}
-		srv := grpc.NewServer(grpc.MaxRecvMsgSize(s.maxRecv))
+	}
+	if s.httpAddr != "" {
+		httpLn, err = net.Listen("tcp", s.httpAddr)
+		if err != nil {
+			if grpcLn != nil {
+				_ = grpcLn.Close()
+			}
+			return err
+		}
+	}
+
+	if grpcLn != nil {
+		serverOpts := append([]grpc.ServerOption{grpc.MaxRecvMsgSize(s.maxRecv)}, s.grpcOpts...)
+		srv := grpc.NewServer(serverOpts...)
 		if s.sink.Traces != nil {
 			coltracepb.RegisterTraceServiceServer(srv, &grpcTraceService{s: s})
 		}
@@ -112,15 +176,14 @@ func (s *Server) Start() error {
 			collogspb.RegisterLogsServiceServer(srv, &grpcLogsService{s: s})
 		}
 		s.mu.Lock()
-		s.grpcLn, s.grpcSrv = ln, srv
+		s.grpcLn, s.grpcSrv = grpcLn, srv
 		s.mu.Unlock()
-		go func() { _ = srv.Serve(ln) }()
+		go func() { _ = srv.Serve(grpcLn) }()
 	}
 
-	if s.httpAddr != "" {
-		ln, err := net.Listen("tcp", s.httpAddr)
-		if err != nil {
-			return err
+	if httpLn != nil {
+		if s.httpTLS != nil {
+			httpLn = tls.NewListener(httpLn, s.httpTLS.Clone())
 		}
 		mux := http.NewServeMux()
 		if s.sink.Traces != nil {
@@ -135,11 +198,31 @@ func (s *Server) Start() error {
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
+		handlerCtx, cancel := context.WithCancel(context.Background())
+		secured := s.httpAuth(mux)
+		tracked := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.httpHandlerMu.Lock()
+			if s.httpStopping {
+				s.httpHandlerMu.Unlock()
+				http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+				return
+			}
+			s.httpWG.Add(1)
+			s.httpHandlerMu.Unlock()
+			defer s.httpWG.Done()
+			secured.ServeHTTP(w, r)
+		})
 		s.mu.Lock()
-		s.httpLn = ln
-		s.httpSrv = &http.Server{Handler: mux, ReadTimeout: 10 * time.Second}
+		s.httpLn = httpLn
+		s.httpCancel = cancel
+		s.httpSrv = &http.Server{
+			Handler:     tracked,
+			ReadTimeout: 10 * time.Second,
+			BaseContext: func(net.Listener) context.Context { return handlerCtx },
+		}
+		httpSrv := s.httpSrv
 		s.mu.Unlock()
-		go func() { _ = s.httpSrv.Serve(ln) }()
+		go func() { _ = httpSrv.Serve(httpLn) }()
 	}
 	return nil
 }
@@ -149,7 +232,7 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	<-s.ready
 	s.mu.Lock()
-	grpcSrv, httpSrv := s.grpcSrv, s.httpSrv
+	grpcSrv, httpSrv, httpCancel := s.grpcSrv, s.httpSrv, s.httpCancel
 	s.mu.Unlock()
 
 	if grpcSrv != nil {
@@ -162,7 +245,24 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 	if httpSrv != nil {
-		return httpSrv.Shutdown(ctx)
+		s.httpHandlerMu.Lock()
+		s.httpStopping = true
+		s.httpHandlerMu.Unlock()
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			// Shutdown does not cancel active handlers when its context expires.
+			// Cancel their request contexts and close their connections so no
+			// handler can remain blocked in Enqueue while pipeline queues close.
+			if httpCancel != nil {
+				httpCancel()
+			}
+			_ = httpSrv.Close()
+			s.httpWG.Wait()
+			return err
+		}
+		if httpCancel != nil {
+			httpCancel()
+		}
+		s.httpWG.Wait()
 	}
 	return nil
 }
@@ -350,7 +450,7 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 			RejectedSpans: int64(rejected), ErrorMessage: reason,
 		}
 	}
-	writeProtoResponse(w, resp)
+	writeResponse(w, enc, resp)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
@@ -378,7 +478,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 			RejectedDataPoints: int64(rejected), ErrorMessage: reason,
 		}
 	}
-	writeProtoResponse(w, resp)
+	writeResponse(w, enc, resp)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
@@ -406,12 +506,18 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 			RejectedLogRecords: int64(rejected), ErrorMessage: reason,
 		}
 	}
-	writeProtoResponse(w, resp)
+	writeResponse(w, enc, resp)
 }
 
-func writeProtoResponse(w http.ResponseWriter, m proto.Message) {
-	resp, _ := proto.Marshal(m)
-	w.Header().Set("Content-Type", "application/x-protobuf")
+func writeResponse(w http.ResponseWriter, enc otlphttp.Encoding, m proto.Message) {
+	var resp []byte
+	if enc == otlphttp.EncodingJSON {
+		resp, _ = protojson.Marshal(m)
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		resp, _ = proto.Marshal(m)
+		w.Header().Set("Content-Type", "application/x-protobuf")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }

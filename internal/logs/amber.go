@@ -10,6 +10,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+
+	"github.com/yaop-labs/reef/reefclient"
 )
 
 // AmberExporter posts OTLP log requests to amber's /v1/logs endpoint. amber is
@@ -21,18 +23,19 @@ type AmberExporter struct {
 	retry  RetryPolicy
 }
 
-func NewAmberExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*AmberExporter, error) {
+func NewAmberExporter(endpoint string, timeout time.Duration, retry RetryPolicy, options ...reefclient.Config) (*AmberExporter, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("amber log exporter: endpoint required")
 	}
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+	client, err := exporterHTTPClient(timeout, options)
+	if err != nil {
+		return nil, fmt.Errorf("amber log exporter transport: %w", err)
 	}
 	url := strings.TrimRight(endpoint, "/")
 	if !strings.HasSuffix(url, "/v1/logs") {
 		url += "/v1/logs"
 	}
-	return &AmberExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
+	return &AmberExporter{url: url, client: client, retry: retry}, nil
 }
 
 func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
