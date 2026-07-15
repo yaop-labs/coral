@@ -33,8 +33,13 @@ func (r *ThriftHTTPReceiver) Start(ctx context.Context, emit func(context.Contex
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(req.Body, 16<<20))
+		body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 16<<20))
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

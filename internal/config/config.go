@@ -36,6 +36,9 @@ type Config struct {
 	// MetricPipeline is the optional metrics path (wisp → coral → amber),
 	// independent of the trace pipeline above.
 	MetricPipeline *MetricPipelineConfig `yaml:"metric_pipeline"`
+
+	// LogPipeline is the optional logs path, independent of traces and metrics.
+	LogPipeline *LogPipelineConfig `yaml:"log_pipeline"`
 }
 
 // PipelineConfig configures pipeline concurrency.
@@ -111,9 +114,15 @@ type ValidateConfig struct {
 	CredsPatterns []string `yaml:"creds_patterns"`
 }
 
+// RedactConfig configures the redact processor of the metric and log pipelines.
+type RedactConfig struct {
+	CredsPatterns []string `yaml:"creds_patterns"`
+}
+
 // AttributeAction configures one attributes processor action.
 type AttributeAction struct {
 	Action string `yaml:"action"`
+	Scope  string `yaml:"scope"` // "span" (default) or "resource"
 	Key    string `yaml:"key"`
 	Value  string `yaml:"value"`
 	NewKey string `yaml:"new_key"`
@@ -173,26 +182,18 @@ type MetricsConfig struct {
 	Endpoint string `yaml:"endpoint"`
 }
 
-// MetricPipelineConfig configures the metrics pipeline: OTLP receivers, enrich
-// processors, and an amber exporter.
+// MetricPipelineConfig configures the metrics pipeline: enrich processors and
+// exporters. Metrics arrive over the shared OTLP ingress (top-level
+// `receivers.otlp_grpc`/`otlp_http`), not a pipeline-local listener.
 type MetricPipelineConfig struct {
-	Receivers  MetricReceiversConfig `yaml:"receivers"`
-	Processors []ProcessorConfig     `yaml:"processors"`
-	Exporter   MetricExporterConfig  `yaml:"exporter"`
-}
-
-// MetricReceiversConfig configures the OTLP metric receivers.
-type MetricReceiversConfig struct {
-	OTLPGRPC *EndpointConfig `yaml:"otlp_grpc"`
-	OTLPHTTP *EndpointConfig `yaml:"otlp_http"`
-}
-
-func (m MetricReceiversConfig) AnyEnabled() bool {
-	return m.OTLPGRPC != nil || m.OTLPHTTP != nil
+	Processors []ProcessorConfig      `yaml:"processors"`
+	Exporter   MetricExporterConfig   `yaml:"exporter"`
+	Exporters  []MetricExporterConfig `yaml:"exporters"`
 }
 
 // MetricExporterConfig configures the amber metrics exporter.
 type MetricExporterConfig struct {
+	Type     string      `yaml:"type"`
 	Endpoint string      `yaml:"endpoint"`
 	Timeout  Duration    `yaml:"timeout"`
 	Retry    RetryConfig `yaml:"retry"`
@@ -218,12 +219,28 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
-	traceEnabled := c.Receivers.AnyEnabled()
-	if !traceEnabled && c.MetricPipeline == nil {
-		return fmt.Errorf("at least one receiver is required: enable a trace receiver or metric_pipeline")
+	otlpIngress := c.Receivers.OTLPGRPC != nil || c.Receivers.OTLPHTTP != nil
+	anyTraceReceiver := c.Receivers.AnyEnabled()
+	metricActive := c.MetricPipeline != nil
+	logActive := c.LogPipeline != nil
+
+	if !anyTraceReceiver && !metricActive && !logActive {
+		return fmt.Errorf("at least one receiver is required: enable an OTLP or legacy trace receiver, metric_pipeline, or log_pipeline")
 	}
 
-	if traceEnabled {
+	// Metrics and logs are OTLP-only; they ride the shared ingress and cannot be
+	// fed by the legacy (Jaeger/Zipkin) trace receivers.
+	if (metricActive || logActive) && !otlpIngress {
+		return fmt.Errorf("metric_pipeline/log_pipeline require the shared OTLP ingress: set receivers.otlp_grpc or receivers.otlp_http")
+	}
+
+	// The top-level receivers/processors/exporters describe the trace pipeline.
+	// It is engaged when trace processors or exporters are declared; a bare trace
+	// receiver with no metric/log pipeline also implies trace intent and must
+	// carry exporters.
+	traceEngaged := len(c.Exporters) > 0 || len(c.Processors) > 0 ||
+		(anyTraceReceiver && !metricActive && !logActive)
+	if traceEngaged {
 		for i, pc := range c.Processors {
 			if pc.Type == "" {
 				return fmt.Errorf("processors[%d]: type is required", i)
@@ -244,15 +261,20 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("exporters[%d]: type is required", i)
 			}
 			switch ec.Type {
-			case "devnull", "amber", "s3":
+			case "devnull", "amber", "fathom", "s3":
 			default:
 				return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
 			}
 		}
 	}
 
-	if c.MetricPipeline != nil {
+	if metricActive {
 		if err := c.MetricPipeline.validate(); err != nil {
+			return err
+		}
+	}
+	if logActive {
+		if err := c.LogPipeline.validate(); err != nil {
 			return err
 		}
 	}
@@ -260,21 +282,108 @@ func (c *Config) Validate() error {
 }
 
 func (m *MetricPipelineConfig) validate() error {
-	if !m.Receivers.AnyEnabled() {
-		return fmt.Errorf("metric_pipeline.receivers: at least one OTLP receiver is required")
-	}
-	if m.Exporter.Endpoint == "" {
+	exporters := m.effectiveExporters()
+	if len(exporters) == 0 {
 		return fmt.Errorf("metric_pipeline.exporter.endpoint is required")
+	}
+	for i, exporter := range exporters {
+		if exporter.Endpoint == "" {
+			return fmt.Errorf("metric_pipeline.exporters[%d].endpoint is required", i)
+		}
+		switch exporter.metricType() {
+		case "amber", "fathom":
+		default:
+			return fmt.Errorf("metric_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
 	}
 	for i, pc := range m.Processors {
 		if pc.Type == "" {
 			return fmt.Errorf("metric_pipeline.processors[%d]: type is required", i)
 		}
-		if pc.Type != "attributes" {
+		switch pc.Type {
+		case "attributes", "redact":
+		default:
 			return fmt.Errorf("metric_pipeline.processors[%d]: unknown type %q", i, pc.Type)
 		}
 	}
 	return nil
+}
+
+func (m MetricPipelineConfig) effectiveExporters() []MetricExporterConfig {
+	if len(m.Exporters) > 0 {
+		return m.Exporters
+	}
+	if m.Exporter.Endpoint != "" {
+		return []MetricExporterConfig{m.Exporter}
+	}
+	return nil
+}
+
+func (m MetricExporterConfig) metricType() string {
+	if m.Type == "" {
+		return "amber"
+	}
+	return m.Type
+}
+
+// LogPipelineConfig configures the logs pipeline: optional processors (redact)
+// and exporters. Logs arrive over the shared OTLP ingress (top-level
+// `receivers.otlp_grpc`/`otlp_http`), not a pipeline-local listener.
+type LogPipelineConfig struct {
+	Processors []ProcessorConfig   `yaml:"processors"`
+	Exporter   LogExporterConfig   `yaml:"exporter"`
+	Exporters  []LogExporterConfig `yaml:"exporters"`
+}
+
+// LogExporterConfig configures a log exporter.
+type LogExporterConfig struct {
+	Type     string      `yaml:"type"`
+	Endpoint string      `yaml:"endpoint"`
+	Timeout  Duration    `yaml:"timeout"`
+	Retry    RetryConfig `yaml:"retry"`
+}
+
+func (l *LogPipelineConfig) validate() error {
+	exporters := l.effectiveExporters()
+	if len(exporters) == 0 {
+		return fmt.Errorf("log_pipeline.exporter.endpoint is required")
+	}
+	for i, exporter := range exporters {
+		if exporter.Endpoint == "" {
+			return fmt.Errorf("log_pipeline.exporters[%d].endpoint is required", i)
+		}
+		switch exporter.logType() {
+		case "amber", "fathom":
+		default:
+			return fmt.Errorf("log_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
+	}
+	for i, pc := range l.Processors {
+		if pc.Type == "" {
+			return fmt.Errorf("log_pipeline.processors[%d]: type is required", i)
+		}
+		if pc.Type != "redact" {
+			return fmt.Errorf("log_pipeline.processors[%d]: unknown type %q", i, pc.Type)
+		}
+	}
+	return nil
+}
+
+func (l LogPipelineConfig) effectiveExporters() []LogExporterConfig {
+	if len(l.Exporters) > 0 {
+		return l.Exporters
+	}
+	if l.Exporter.Endpoint != "" {
+		return []LogExporterConfig{l.Exporter}
+	}
+	return nil
+}
+
+func (l LogExporterConfig) logType() string {
+	if l.Type == "" {
+		return "amber"
+	}
+	return l.Type
 }
 
 func (c ReceiversConfig) AnyEnabled() bool {

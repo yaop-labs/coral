@@ -256,3 +256,6 @@ func (s Span) SizeBytes() int {
 type Batch struct {
 	Spans []Span
 }
+
+// Len reports the number of spans, satisfying pipeline.Signal.
+func (b Batch) Len() int { return len(b.Spans) }

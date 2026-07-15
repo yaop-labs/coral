@@ -3,14 +3,20 @@ package integration
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
@@ -106,6 +112,52 @@ func sendTracesHTTP(t *testing.T, addr string, req *coltracepb.ExportTraceServic
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /v1/traces: status %d", resp.StatusCode)
+	}
+}
+
+// startTraceIngress binds a unified OTLP ingress (HTTP only) that feeds p's
+// trace queue, returning the bound HTTP address. It replaces the former
+// per-signal HTTP trace receiver in these lower-level pipeline tests.
+func startTraceIngress(t *testing.T, p *pipeline.Pipeline[model.Batch]) string {
+	t.Helper()
+	ing := otlprecv.NewServer("", "127.0.0.1:0", 0, otlprecv.Sink{Traces: p.Enqueue})
+	if err := ing.Start(); err != nil {
+		t.Fatalf("ingress Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = ing.Stop(ctx)
+	})
+	return ing.HTTPAddr()
+}
+
+// ymlExporter builds a trace ExporterConfig from a YAML mapping (so its Raw node
+// is populated the way the real loader populates it, letting buildExporter
+// decode the amber endpoint).
+func ymlExporter(t *testing.T, doc string) config.ExporterConfig {
+	t.Helper()
+	var ec config.ExporterConfig
+	if err := yaml.Unmarshal([]byte(doc), &ec); err != nil {
+		t.Fatalf("ymlExporter: %v", err)
+	}
+	return ec
+}
+
+// postProtoPath posts a protobuf OTLP message to addr+path and requires 200.
+func postProtoPath(t *testing.T, addr, path string, m proto.Message) {
+	t.Helper()
+	body, err := proto.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+addr+path, "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST %s: status %d", path, resp.StatusCode)
 	}
 }
 
@@ -250,13 +302,13 @@ func (r *fakeReceiver) Send(ctx context.Context, b model.Batch) error {
 	return emit(ctx, b)
 }
 
-var _ pipeline.Receiver = (*fakeReceiver)(nil)
+var _ pipeline.Receiver[model.Batch] = (*fakeReceiver)(nil)
 
 func TestIntegration_FakeReceiver_SpanFlowsThroughPipeline(t *testing.T) {
 	cap := &capturingExporter{}
 	recv := newFakeReceiver()
 
-	p := pipeline.New(pipeline.Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p := pipeline.New[model.Batch](pipeline.Config{Workers: 1, QueueSize: 16}, slog.Default())
 	p.AddReceiver(recv)
 	p.AddExporter(cap)
 
@@ -416,7 +468,7 @@ func TestE2E_AttributesProcessor_DeletesKey(t *testing.T) {
 // traces and resumes the pipeline after the sampler.
 func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 	cap := &capturingExporter{}
-	p := pipeline.New(pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
+	p := pipeline.New[model.Batch](pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
 
 	ts := sampling.NewTail(
 		30*time.Millisecond,
@@ -431,12 +483,6 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 	p.AddProcessor(ts)
 	p.AddExporter(cap)
 
-	httpRecv, err := otlprecv.NewHTTP("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("NewHTTP: %v", err)
-	}
-	p.AddReceiver(httpRecv)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -449,7 +495,7 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 		t.Fatalf("pipeline.Start: %v", err)
 	}
 	ts.Start(ctx)
-	time.Sleep(5 * time.Millisecond) // wait for receiver to bind
+	addr := startTraceIngress(t, p)
 
 	req := makeSpanRequest(
 		[16]byte{80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -457,7 +503,7 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 		"error-op",
 		true,
 	)
-	sendTracesHTTP(t, httpRecv.Addr(), req)
+	sendTracesHTTP(t, addr, req)
 
 	waitFor(t, 500*time.Millisecond, func() bool { return cap.count() >= 1 })
 	if cap.count() == 0 {
@@ -469,7 +515,7 @@ func TestE2E_TailSampling_ErrorTraceKept(t *testing.T) {
 // when the sampler has only an error rule and a zero default keep rate.
 func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 	cap := &capturingExporter{}
-	p := pipeline.New(pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
+	p := pipeline.New[model.Batch](pipeline.Config{Workers: 2, QueueSize: 256}, slog.Default())
 
 	ts := sampling.NewTail(
 		30*time.Millisecond,
@@ -484,12 +530,6 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 	p.AddProcessor(ts)
 	p.AddExporter(cap)
 
-	httpRecv, err := otlprecv.NewHTTP("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("NewHTTP: %v", err)
-	}
-	p.AddReceiver(httpRecv)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -502,7 +542,7 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 		t.Fatalf("pipeline.Start: %v", err)
 	}
 	ts.Start(ctx)
-	time.Sleep(5 * time.Millisecond) // wait for receiver to bind
+	addr := startTraceIngress(t, p)
 
 	req := makeSpanRequest(
 		[16]byte{81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -510,7 +550,7 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 		"clean-op",
 		false,
 	)
-	sendTracesHTTP(t, httpRecv.Addr(), req)
+	sendTracesHTTP(t, addr, req)
 
 	// Wait well beyond decisionWait (30ms) to let the tail sampler decide.
 	time.Sleep(200 * time.Millisecond)
@@ -518,6 +558,282 @@ func TestE2E_TailSampling_CleanTraceDropped(t *testing.T) {
 	if cap.count() != 0 {
 		t.Errorf("clean trace must be dropped, got %d spans", cap.count())
 	}
+}
+
+// TestE2E_UnifiedEndpoint_AllSignals is the headline P0-1 check: traces,
+// metrics, and logs sent to the SAME OTLP ports (gRPC and HTTP) each reach their
+// pipeline and are forwarded to amber. Before the unified ingress, metrics on
+// the trace port returned Unimplemented and /v1/metrics returned 404.
+func TestE2E_UnifiedEndpoint_AllSignals(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]int{}
+	amber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer amber.Close()
+
+	cfg := config.Config{
+		Pipeline: config.PipelineConfig{Workers: 2, QueueSize: 256},
+		Receivers: config.ReceiversConfig{
+			OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+			OTLPGRPC: &config.EndpointConfig{Endpoint: "127.0.0.1:0"},
+		},
+		Exporters: []config.ExporterConfig{ymlExporter(t, "type: amber\nendpoint: "+amber.URL+"/v1/traces")},
+		MetricPipeline: &config.MetricPipelineConfig{
+			Exporters: []config.MetricExporterConfig{{Type: "amber", Endpoint: amber.URL}},
+		},
+		LogPipeline: &config.LogPipelineConfig{
+			Exporters: []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}},
+		},
+	}
+
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := a.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		sc, scCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scCancel()
+		_ = a.Shutdown(sc)
+	})
+
+	// Traces over gRPC, metrics and logs over HTTP — all to the one ingress.
+	sendTracesGRPC(t, a.OTLPGRPCAddr(), makeSpanRequest(
+		[16]byte{1}, [8]byte{1}, "unified-trace", false))
+	httpAddr := a.OTLPHTTPAddr()
+	postProtoPath(t, httpAddr, "/v1/metrics", &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{{
+			ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+				Name: "unified_metric",
+				Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
+					TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 1},
+				}}}},
+			}}}},
+		}},
+	})
+	postProtoPath(t, httpAddr, "/v1/logs", &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
+				TimeUnixNano: 1,
+				Body:         &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "unified-log"}},
+			}}}},
+		}},
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits["/v1/traces"] >= 1 && hits["/v1/metrics"] >= 1 && hits["/v1/logs"] >= 1
+	})
+}
+
+// TestE2E_LogRedaction drives a secret-bearing log through the app's log
+// pipeline (ingress → redact → amber) and asserts amber receives the scrubbed
+// record — the P1-7 redaction the review deferred to the P0-1 session.
+func TestE2E_LogRedaction(t *testing.T) {
+	var mu sync.Mutex
+	var got *collogspb.ExportLogsServiceRequest
+	amber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		req := &collogspb.ExportLogsServiceRequest{}
+		_ = proto.Unmarshal(body, req)
+		mu.Lock()
+		got = req
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer amber.Close()
+
+	cfg := config.Config{
+		Pipeline:  config.PipelineConfig{Workers: 1, QueueSize: 64},
+		Receivers: config.ReceiversConfig{OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"}},
+		LogPipeline: &config.LogPipelineConfig{
+			Processors: []config.ProcessorConfig{processorCfg(t, "type: redact\ncreds_patterns:\n  - '(?i)authorization|password'")},
+			Exporters:  []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}},
+		},
+	}
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := a.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		sc, scCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scCancel()
+		_ = a.Shutdown(sc)
+	})
+
+	postProtoPath(t, a.OTLPHTTPAddr(), "/v1/logs", &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
+				TimeUnixNano: 1,
+				Attributes: []*commonpb.KeyValue{{Key: "authorization", Value: &commonpb.AnyValue{
+					Value: &commonpb.AnyValue_StringValue{StringValue: "Bearer xyz"}}}},
+				Body: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "password=hunter2"}},
+			}}}},
+		}},
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return got != nil
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	rec := got.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+	if got := rec.Body.GetStringValue(); got != "[REDACTED]" {
+		t.Errorf("log body not redacted at amber: %q", got)
+	}
+	if got := rec.Attributes[0].Value.GetStringValue(); got != "[REDACTED]" {
+		t.Errorf("authorization attr not redacted at amber: %q", got)
+	}
+}
+
+// TestE2E_PartialSuccess_OversizedSpanReported drives a batch of one oversized
+// and one valid span through the app: the oversized span is rejected at accept
+// time (validate.max_span_bytes) and reported via partial_success, while the
+// valid span still reaches the exporter (contract §4, B-3).
+func TestE2E_PartialSuccess_OversizedSpanReported(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Processors = []config.ProcessorConfig{processorCfg(t, "type: validate\nmax_span_bytes: 150")}
+	a, cap := startApp(t, cfg)
+
+	big := makeSpanRequest([16]byte{0xB1}, [8]byte{0xB1}, string(make([]byte, 300)), false)
+	small := makeSpanRequest([16]byte{0x51}, [8]byte{0x51}, "ok", false)
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: append(big.ResourceSpans, small.ResourceSpans...),
+	}
+
+	body, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+a.OTLPHTTPAddr()+"/v1/traces", "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out coltracepb.ExportTraceServiceResponse
+	if err := proto.Unmarshal(rb, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.GetPartialSuccess().GetRejectedSpans() != 1 {
+		t.Errorf("rejected_spans = %d, want 1", out.GetPartialSuccess().GetRejectedSpans())
+	}
+
+	waitFor(t, 2*time.Second, func() bool { return cap.count() == 1 })
+	if cap.count() != 1 {
+		t.Errorf("exported = %d, want 1 (valid span kept)", cap.count())
+	}
+}
+
+// TestE2E_ServiceNameEnforced sends a metric and a log with no service.name and
+// asserts coral stamps service.name=unknown_service before forwarding to amber
+// (contract §6), for both the metric and log pipelines.
+func TestE2E_ServiceNameEnforced(t *testing.T) {
+	var mu sync.Mutex
+	var gotM *colmetricspb.ExportMetricsServiceRequest
+	var gotL *collogspb.ExportLogsServiceRequest
+	amber := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		switch r.URL.Path {
+		case "/v1/metrics":
+			m := &colmetricspb.ExportMetricsServiceRequest{}
+			_ = proto.Unmarshal(body, m)
+			gotM = m
+		case "/v1/logs":
+			l := &collogspb.ExportLogsServiceRequest{}
+			_ = proto.Unmarshal(body, l)
+			gotL = l
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer amber.Close()
+
+	cfg := config.Config{
+		Pipeline:       config.PipelineConfig{Workers: 1, QueueSize: 64},
+		Receivers:      config.ReceiversConfig{OTLPHTTP: &config.EndpointConfig{Endpoint: "127.0.0.1:0"}},
+		MetricPipeline: &config.MetricPipelineConfig{Exporters: []config.MetricExporterConfig{{Type: "amber", Endpoint: amber.URL}}},
+		LogPipeline:    &config.LogPipelineConfig{Exporters: []config.LogExporterConfig{{Type: "amber", Endpoint: amber.URL}}},
+	}
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := a.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		sc, scCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer scCancel()
+		_ = a.Shutdown(sc)
+	})
+
+	// No Resource / service.name on either payload.
+	postProtoPath(t, a.OTLPHTTPAddr(), "/v1/metrics", &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{{
+			ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+				Name: "m",
+				Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
+					TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 1},
+				}}}},
+			}}}},
+		}},
+	})
+	postProtoPath(t, a.OTLPHTTPAddr(), "/v1/logs", &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{TimeUnixNano: 1}}}},
+		}},
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return gotM != nil && gotL != nil
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if v := resourceServiceName(gotM.ResourceMetrics[0].GetResource()); v != "unknown_service" {
+		t.Errorf("metric service.name = %q, want unknown_service", v)
+	}
+	if v := resourceServiceName(gotL.ResourceLogs[0].GetResource()); v != "unknown_service" {
+		t.Errorf("log service.name = %q, want unknown_service", v)
+	}
+}
+
+func resourceServiceName(res *resourcepb.Resource) string {
+	for _, kv := range res.GetAttributes() {
+		if kv.GetKey() == "service.name" {
+			return kv.GetValue().GetStringValue()
+		}
+	}
+	return ""
 }
 
 func TestE2E_MultiReceiver_BothDeliver(t *testing.T) {

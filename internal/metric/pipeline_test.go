@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -20,8 +18,8 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
-// TestMetricPipelineEndToEnd wires receiver → attributes(enrich) → amber
-// exporter, then pushes OTLP metrics over gRPC and asserts the fake amber
+// TestMetricPipelineEndToEnd wires attributes(enrich) → amber exporter and
+// pushes an OTLP metric batch through the pipeline, asserting the fake amber
 // received the enriched, intact metrics over HTTP /v1/metrics.
 func TestMetricPipelineEndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -41,7 +39,6 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	}))
 	defer amber.Close()
 
-	recv := NewOTLPReceiver("127.0.0.1:0", "", logger)
 	attrs := NewAttributesProcessor([]AttributeAction{{Action: "upsert", Key: "collector", Value: "coral"}})
 	exp, err := NewAmberExporter(amber.URL, 2*time.Second, RetryPolicy{})
 	if err != nil {
@@ -49,28 +46,11 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	}
 
 	p := NewPipeline(2, 100, logger)
-	p.AddReceiver(recv)
 	p.AddProcessor(attrs)
 	p.AddExporter(exp)
+	defer func() { _ = p.Shutdown(context.Background()) }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := p.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cancel()
-		_ = p.Shutdown(context.Background())
-	}()
-
-	// gRPC client pushes one gauge point.
-	conn, err := grpc.NewClient(recv.GRPCAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	client := colmetricspb.NewMetricsServiceClient(conn)
-
-	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+	batch := Batch{ResourceMetrics: []*metricspb.ResourceMetrics{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "app")}},
 		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
 			Name: "cpu_seconds_total",
@@ -79,20 +59,10 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 			}}}},
 		}}}},
 	}}}
-	if _, err := client.Export(context.Background(), req); err != nil {
-		t.Fatalf("grpc export: %v", err)
-	}
-
-	// Wait for the batch to traverse the pipeline and reach fake amber.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		done := got != nil
-		mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Export runs the processor chain and exporters synchronously in this
+	// goroutine, so the fake amber has been called by the time it returns.
+	if err := p.Export(context.Background(), batch); err != nil {
+		t.Fatalf("export: %v", err)
 	}
 
 	mu.Lock()
@@ -116,5 +86,42 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	m := got.ResourceMetrics[0].ScopeMetrics[0].Metrics[0]
 	if m.Name != "cpu_seconds_total" || m.GetGauge().DataPoints[0].GetAsInt() != 7 {
 		t.Errorf("metric not preserved: %+v", m)
+	}
+}
+
+func TestFathomMetricExporterExport(t *testing.T) {
+	var gotPath string
+	var got *colmetricspb.ExportMetricsServiceRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		req := &colmetricspb.ExportMetricsServiceRequest{}
+		_ = proto.Unmarshal(body, req)
+		gotPath = r.URL.Path
+		got = req
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	exp, err := NewFathomExporter(server.URL, time.Second, RetryPolicy{})
+	if err != nil {
+		t.Fatalf("new fathom exporter: %v", err)
+	}
+	err = exp.Export(context.Background(), Batch{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "app")}},
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+			Name: "cpu_seconds_total",
+			Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
+				TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 7},
+			}}}},
+		}}}},
+	}}})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if gotPath != "/v1/metrics" {
+		t.Fatalf("path = %q, want /v1/metrics", gotPath)
+	}
+	if got == nil || len(got.ResourceMetrics) != 1 {
+		t.Fatalf("unexpected metric request: %+v", got)
 	}
 }

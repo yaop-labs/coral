@@ -61,31 +61,39 @@ func (r *ThriftUDPReceiver) Start(ctx context.Context, emit func(context.Context
 				}
 				continue
 			}
+			if ctx.Err() != nil {
+				return
+			}
 
 			packet := make([]byte, n)
 			copy(packet, buf[:n])
-
-			spans, err := DecodeBatch(packet)
-			if err != nil || len(spans) == 0 {
-				continue
-			}
-
-			b := model.Batch{Spans: spans}
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if err := emit(ctx, b); err != nil {
-					r.dropped.Add(uint64(len(spans)))
-				} else {
-					r.spans.Add(uint64(len(spans)))
-				}
-			}
+			r.handlePacket(ctx, packet, emit)
 		}
 	}()
 
 	<-ctx.Done()
 	return nil
+}
+
+// handlePacket decodes one datagram and emits its spans. It recovers from any
+// panic in the Thrift decoder so a single malformed packet can never take down
+// the whole process — defense-in-depth on top of the decoder's bounds checks.
+func (r *ThriftUDPReceiver) handlePacket(ctx context.Context, packet []byte, emit func(context.Context, model.Batch) error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.dropped.Add(1)
+		}
+	}()
+
+	spans, err := DecodeBatch(packet)
+	if err != nil || len(spans) == 0 {
+		return
+	}
+	if err := emit(ctx, model.Batch{Spans: spans}); err != nil {
+		r.dropped.Add(uint64(len(spans)))
+	} else {
+		r.spans.Add(uint64(len(spans)))
+	}
 }
 
 func (r *ThriftUDPReceiver) Stop(ctx context.Context) error {

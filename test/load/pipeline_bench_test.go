@@ -51,10 +51,10 @@ func (r *benchReceiver) Send(ctx context.Context, b model.Batch) error {
 
 // startBenchPipeline wires a pipeline with a benchReceiver and devnull exporter.
 // The caller must cancel the context and call Shutdown.
-func startBenchPipeline(b *testing.B, procs ...pipeline.Processor) (*pipeline.Pipeline, *benchReceiver, context.CancelFunc) {
+func startBenchPipeline(b *testing.B, procs ...pipeline.Processor[model.Batch]) (*pipeline.Pipeline[model.Batch], *benchReceiver, context.CancelFunc) {
 	b.Helper()
 	recv := newBenchReceiver()
-	p := pipeline.New(pipeline.Config{
+	p := pipeline.New[model.Batch](pipeline.Config{
 		Workers:   runtime.NumCPU(),
 		QueueSize: 10_000,
 	}, slog.Default())

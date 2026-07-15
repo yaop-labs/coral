@@ -18,4 +18,4 @@ exporters:
   - type: devnull
 
 metrics:
-  endpoint: "127.0.0.1:8888"
+  endpoint: "127.0.0.1:4888"

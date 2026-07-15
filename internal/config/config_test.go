@@ -137,6 +137,9 @@ exporters:
   - type: amber
     endpoint: "http://amber:8080"
     timeout: 10s
+  - type: fathom
+    endpoint: "http://fathom:8099"
+    timeout: 5s
   - type: s3
     bucket: "my-traces"
     region: "us-east-1"
@@ -145,11 +148,146 @@ exporters:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if len(cfg.Exporters) != 2 {
-		t.Fatalf("expected 2 exporters, got %d", len(cfg.Exporters))
+	if len(cfg.Exporters) != 3 {
+		t.Fatalf("expected 3 exporters, got %d", len(cfg.Exporters))
 	}
 	if cfg.Exporters[0].Type != "amber" {
 		t.Errorf("exporters[0].type = %q", cfg.Exporters[0].Type)
+	}
+}
+
+func TestParse_MetricExporters(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+metric_pipeline:
+  exporters:
+    - type: amber
+      endpoint: "http://amber:8080"
+    - type: fathom
+      endpoint: "http://fathom:8099"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.MetricPipeline == nil {
+		t.Fatal("expected metric pipeline")
+	}
+	if len(cfg.MetricPipeline.Exporters) != 2 {
+		t.Fatalf("expected 2 metric exporters, got %d", len(cfg.MetricPipeline.Exporters))
+	}
+	if cfg.MetricPipeline.Exporters[1].Type != "fathom" {
+		t.Fatalf("expected fathom metric exporter, got %+v", cfg.MetricPipeline.Exporters[1])
+	}
+}
+
+func TestParse_LogExporters(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+log_pipeline:
+  exporters:
+    - type: fathom
+      endpoint: "http://fathom:8099"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.LogPipeline == nil {
+		t.Fatal("expected log pipeline")
+	}
+	if len(cfg.LogPipeline.Exporters) != 1 {
+		t.Fatalf("expected 1 log exporter, got %d", len(cfg.LogPipeline.Exporters))
+	}
+	if cfg.LogPipeline.Exporters[0].Type != "fathom" {
+		t.Fatalf("expected fathom log exporter, got %+v", cfg.LogPipeline.Exporters[0])
+	}
+}
+
+func TestParse_LogExporter_Amber(t *testing.T) {
+	// Logs must be allowed to reach amber (the source of truth); an untyped
+	// exporter defaults to amber. Both used to be rejected by validation.
+	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+log_pipeline:
+  exporters:
+    - type: amber
+      endpoint: "http://amber:8080"
+    - endpoint: "http://amber:8080"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.LogPipeline == nil {
+		t.Fatal("expected log pipeline")
+	}
+	if got := cfg.LogPipeline.Exporters[1].logType(); got != "amber" {
+		t.Fatalf("untyped log exporter should default to amber, got %q", got)
+	}
+}
+
+func TestParse_RedactProcessors(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+metric_pipeline:
+  processors:
+    - type: redact
+      creds_patterns:
+        - '(?i)password'
+  exporters:
+    - type: amber
+      endpoint: "http://amber:5318"
+log_pipeline:
+  processors:
+    - type: redact
+      creds_patterns:
+        - '(?i)authorization'
+  exporters:
+    - type: amber
+      endpoint: "http://amber:5318"
+`)
+	cfg, err := Parse(doc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.MetricPipeline.Processors) != 1 || cfg.MetricPipeline.Processors[0].Type != "redact" {
+		t.Fatalf("metric redact processor not parsed: %+v", cfg.MetricPipeline.Processors)
+	}
+	if len(cfg.LogPipeline.Processors) != 1 || cfg.LogPipeline.Processors[0].Type != "redact" {
+		t.Fatalf("log redact processor not parsed: %+v", cfg.LogPipeline.Processors)
+	}
+	var rc RedactConfig
+	if err := cfg.LogPipeline.Processors[0].Raw.Decode(&rc); err != nil {
+		t.Fatal(err)
+	}
+	if len(rc.CredsPatterns) != 1 || rc.CredsPatterns[0] != "(?i)authorization" {
+		t.Errorf("creds_patterns not decoded: %+v", rc.CredsPatterns)
+	}
+}
+
+func TestValidate_LogPipeline_UnknownProcessor(t *testing.T) {
+	doc := []byte(`
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4318"
+log_pipeline:
+  processors:
+    - type: attributes
+  exporters:
+    - type: amber
+      endpoint: "http://amber:5318"
+`)
+	if _, err := Parse(doc); err == nil {
+		t.Fatal("expected error for unknown log processor type")
 	}
 }
 

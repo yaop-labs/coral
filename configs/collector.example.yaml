@@ -4,6 +4,9 @@ pipeline:
   workers: 0
   queue_size: 10000
 
+# A single OTLP ingress (contract §2) serves every signal — traces, metrics and
+# logs — on the platform-standard 4317 (gRPC) / 4318 (HTTP) ports, so a stock
+# OTel SDK just works. Legacy trace-only protocols keep their own ports.
 receivers:
   otlp_grpc:
     endpoint: "0.0.0.0:4317"
@@ -20,6 +23,8 @@ receivers:
     endpoint: "0.0.0.0:9411"
 
 processors:
+  # Spans over max_span_bytes are rejected at ingest and reported to the sender
+  # via OTLP partial_success (contract §4), not retried; creds are redacted.
   - type: validate
     max_span_bytes: 65536
     creds_patterns:
@@ -27,6 +32,12 @@ processors:
       - '[A-Za-z0-9_-]{40,}'
   - type: attributes
     actions:
+      # Enrichment lands on the resource so it reaches the store (contract §6).
+      - action: add
+        scope: resource
+        key: collector
+        value: coral
+      # Scrub a sensitive span attribute (default scope is span).
       - action: delete
         key: "http.request.header.authorization"
   - type: tail_sampling
@@ -42,9 +53,19 @@ processors:
     max_size: 512
     timeout: 1s
 
+# Platform port scheme (contract §2): amber 5317/5318, fathom 6318 (HTTP only).
 exporters:
   - type: amber
-    endpoint: "http://127.0.0.1:8080/v1/traces"
+    endpoint: "http://127.0.0.1:5318/v1/traces"
+    timeout: 5s
+    retry:
+      max_attempts: 3
+      initial_backoff: 100ms
+      max_backoff: 5s
+  # Optional incident-context fan-out. Amber remains durable storage; fathom
+  # stores explain indexes and RCA bundles.
+  - type: fathom
+    endpoint: "http://127.0.0.1:6318/v1/traces"
     timeout: 5s
     retry:
       max_attempts: 3
@@ -52,27 +73,58 @@ exporters:
       max_backoff: 5s
 
 metrics:
-  endpoint: "0.0.0.0:8888"
+  endpoint: "0.0.0.0:4888"
 
-# Metrics pipeline (wisp → coral → amber), independent of the trace pipeline.
-# Receives OTLP metrics from agents, enriches resource attributes, forwards to
-# amber over OTLP/HTTP (amber ingests metrics over HTTP only).
+# Metrics pipeline (wisp → coral → amber), fed by the shared OTLP ingress above.
+# It enriches resource attributes and forwards to amber over OTLP/HTTP.
 metric_pipeline:
-  receivers:
-    otlp_grpc:
-      endpoint: "0.0.0.0:4319"
-    otlp_http:
-      endpoint: "0.0.0.0:4320"
   processors:
     - type: attributes
       actions:
         - action: upsert
           key: collector
           value: coral
-  exporter:
-    endpoint: "http://127.0.0.1:8080" # amber OTLP/HTTP /v1/metrics
-    timeout: 5s
-    retry:
-      max_attempts: 3
-      initial_backoff: 100ms
-      max_backoff: 5s
+    # Scrub credential-bearing metric attributes (contract §8).
+    - type: redact
+      creds_patterns:
+        - '(?i)authorization|password|api[_-]?key|token'
+  exporters:
+    - type: amber
+      endpoint: "http://127.0.0.1:5318" # amber OTLP/HTTP /v1/metrics
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s
+    - type: fathom
+      endpoint: "http://127.0.0.1:6318" # fathom OTLP/HTTP /v1/metrics
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s
+
+# Logs pipeline, fed by the same shared OTLP ingress. Amber is the source of
+# truth and must receive logs; fathom is an additional incident-context fan-out.
+log_pipeline:
+  processors:
+    # Logs are the most frequent secret carrier — scrub attributes and body
+    # (contract §8).
+    - type: redact
+      creds_patterns:
+        - '(?i)authorization|password|api[_-]?key|token'
+  exporters:
+    - type: amber
+      endpoint: "http://127.0.0.1:5318" # amber OTLP/HTTP /v1/logs
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s
+    - type: fathom
+      endpoint: "http://127.0.0.1:6318" # fathom OTLP/HTTP /v1/logs
+      timeout: 5s
+      retry:
+        max_attempts: 3
+        initial_backoff: 100ms
+        max_backoff: 5s

@@ -1,4 +1,4 @@
-package metric
+package logs
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 
 	"github.com/yaop-labs/coral/internal/exporter/backoff"
 )
@@ -20,45 +20,7 @@ import (
 // the backoff package so every signal retries identically (contract §4).
 type RetryPolicy = backoff.Policy
 
-// AmberExporter posts OTLP metric requests to amber's /v1/metrics endpoint.
-// amber ingests metrics over HTTP only, so this is HTTP/protobuf.
-type AmberExporter struct {
-	url    string
-	client *http.Client
-	retry  RetryPolicy
-}
-
-func NewAmberExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*AmberExporter, error) {
-	if endpoint == "" {
-		return nil, fmt.Errorf("amber metric exporter: endpoint required")
-	}
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	url := strings.TrimRight(endpoint, "/")
-	if !strings.HasSuffix(url, "/v1/metrics") {
-		url += "/v1/metrics"
-	}
-	return &AmberExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
-}
-
-func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
-	if b.Empty() {
-		return nil
-	}
-	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: b.ResourceMetrics}
-	body, err := proto.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("amber metrics: marshal: %w", err)
-	}
-	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "amber metrics", body)
-	})
-}
-
-func (e *AmberExporter) Close() error { return nil }
-
-// FathomExporter posts OTLP metric requests to fathom's /v1/metrics endpoint.
+// FathomExporter posts OTLP log requests to fathom's /v1/logs endpoint.
 type FathomExporter struct {
 	url    string
 	client *http.Client
@@ -67,14 +29,14 @@ type FathomExporter struct {
 
 func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy) (*FathomExporter, error) {
 	if endpoint == "" {
-		return nil, fmt.Errorf("fathom metric exporter: endpoint required")
+		return nil, fmt.Errorf("fathom log exporter: endpoint required")
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 	url := strings.TrimRight(endpoint, "/")
-	if !strings.HasSuffix(url, "/v1/metrics") {
-		url += "/v1/metrics"
+	if !strings.HasSuffix(url, "/v1/logs") {
+		url += "/v1/logs"
 	}
 	return &FathomExporter{url: url, client: &http.Client{Timeout: timeout}, retry: retry}, nil
 }
@@ -83,19 +45,19 @@ func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
 	if b.Empty() {
 		return nil
 	}
-	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: b.ResourceMetrics}
+	req := &collogspb.ExportLogsServiceRequest{ResourceLogs: b.ResourceLogs}
 	body, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("fathom metrics: marshal: %w", err)
+		return fmt.Errorf("fathom logs: marshal: %w", err)
 	}
 	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "fathom metrics", body)
+		return post(ctx, e.client, e.url, "fathom logs", body)
 	})
 }
 
 func (e *FathomExporter) Close() error { return nil }
 
-// post sends one OTLP/protobuf request and classifies the outcome per §4.
+// post sends one OTLP/protobuf log request and classifies the outcome per §4.
 func post(ctx context.Context, client *http.Client, url, who string, body []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

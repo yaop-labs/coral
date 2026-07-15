@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaop-labs/coral/internal/exporter/backoff"
 	"github.com/yaop-labs/coral/internal/model"
 )
 
@@ -54,6 +55,33 @@ func TestWrap_RetriesUntilSuccess(t *testing.T) {
 	}
 	if inner.Attempts() != 3 {
 		t.Fatalf("attempts = %d, want 3", inner.Attempts())
+	}
+}
+
+type permanentExporter struct {
+	attempts int
+}
+
+func (e *permanentExporter) Export(_ context.Context, _ model.Batch) error {
+	e.attempts++
+	return backoff.Permanent(errors.New("bad request"))
+}
+
+func (e *permanentExporter) Close() error { return nil }
+
+func TestWrap_StopsOnPermanent(t *testing.T) {
+	inner := &permanentExporter{}
+	exp := Wrap(inner, Config{
+		MaxAttempts:    5,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+	})
+	err := exp.Export(context.Background(), model.Batch{Spans: []model.Span{{Name: "span"}}})
+	if err == nil {
+		t.Fatal("expected the permanent error to surface")
+	}
+	if inner.attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a permanent 4xx must not be retried)", inner.attempts)
 	}
 }
 
