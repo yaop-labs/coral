@@ -24,7 +24,9 @@ type Exporter struct {
 // (backoff.Permanent / backoff.StatusError); Wrap only drives the backoff, so
 // permanent errors such as 4xx are surfaced without wasted retries.
 func Wrap(inner pipeline.Exporter[model.Batch], cfg Config) pipeline.Exporter[model.Batch] {
-	if cfg.MaxAttempts <= 1 {
+	// One explicitly means a single attempt. Zero is unset and is resolved by
+	// backoff.Policy to the same three-attempt default used by metrics and logs.
+	if cfg.MaxAttempts == 1 {
 		return inner
 	}
 	return &Exporter{inner: inner, policy: backoff.Policy{

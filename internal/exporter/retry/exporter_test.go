@@ -92,3 +92,14 @@ func TestWrap_DisabledWhenMaxAttemptsIsOne(t *testing.T) {
 		t.Fatal("Wrap should return inner exporter when retry is disabled")
 	}
 }
+
+func TestWrap_UnsetMaxAttemptsUsesSharedDefault(t *testing.T) {
+	inner := &flakyExporter{failures: 2}
+	exp := Wrap(inner, Config{InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+	if err := exp.Export(context.Background(), model.Batch{Spans: []model.Span{{Name: "span"}}}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if got := inner.Attempts(); got != 3 {
+		t.Fatalf("attempts = %d, want shared default 3", got)
+	}
+}
