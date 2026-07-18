@@ -14,6 +14,7 @@ import (
 	"time"
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -203,6 +204,7 @@ type TenantLimit struct {
 	MaxRequestsPerSecond int
 	MaxLogRecordBytes    int
 	MaxLogAttributes     int
+	MaxLogAttributeKeys  int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -862,6 +864,33 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 					}
 					for _, record := range scope.GetLogRecords() {
 						if len(record.GetAttributes()) > limit {
+							return 0, "", errLogRecordTooLarge
+						}
+					}
+				}
+			}
+		}
+		if limit := limits.MaxLogAttributeKeys; limit > 0 {
+			keys := make(map[string]struct{})
+			addKeys := func(attrs []*commonpb.KeyValue) bool {
+				for _, attr := range attrs {
+					keys[attr.GetKey()] = struct{}{}
+					if len(keys) > limit {
+						return false
+					}
+				}
+				return true
+			}
+			for _, resource := range rl {
+				if !addKeys(resource.GetResource().GetAttributes()) {
+					return 0, "", errLogRecordTooLarge
+				}
+				for _, scope := range resource.GetScopeLogs() {
+					if !addKeys(scope.GetScope().GetAttributes()) {
+						return 0, "", errLogRecordTooLarge
+					}
+					for _, record := range scope.GetLogRecords() {
+						if !addKeys(record.GetAttributes()) {
 							return 0, "", errLogRecordTooLarge
 						}
 					}

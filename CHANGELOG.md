@@ -39,6 +39,8 @@ tested, documented increment.
   rejected before sink/journal with permanent `InvalidArgument`/`400` semantics.
 - Added configurable per-tenant `max_log_attributes` for resource, scope, and
   record attributes, with the same fail-before-acknowledgement semantics.
+- Added configurable per-tenant `max_log_attribute_keys` to bound distinct
+  attribute-key cardinality across each log request.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 
