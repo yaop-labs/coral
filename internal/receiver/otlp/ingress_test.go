@@ -511,6 +511,23 @@ func TestTenantQuotaExceeded(t *testing.T) {
 	}
 }
 
+func TestLogRecordLimitsRejectBeforeSink(t *testing.T) {
+	called := false
+	s := &Server{
+		tenantMap:    map[string]string{"principal": "tenant-a"},
+		tenantLimits: map[string]TenantLimit{"tenant-a": {MaxLogRecordBytes: 1, MaxLogAttributes: 1, MaxLogAttributeKeys: 1}},
+		sink:         Sink{Logs: func(context.Context, logs.Batch) error { called = true; return nil }},
+	}
+	ctx := bearer.ContextWithPrincipal(context.Background(), "principal")
+	rl := []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{Body: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "too large"}}}}}}}}
+	if _, _, err := s.admitLogs(ctx, rl); !errors.Is(err, errLogRecordTooLarge) {
+		t.Fatalf("admission error = %v, want log record limit", err)
+	}
+	if called {
+		t.Fatal("log sink called for rejected record")
+	}
+}
+
 func TestTenantConcurrentAdmission(t *testing.T) {
 	s := &Server{tenantLimits: map[string]TenantLimit{"tenant-a": {MaxConcurrent: 1}}, tenantStats: map[string]TenantCounters{"tenant-a": {}}}
 	ctx := context.WithValue(context.Background(), tenantContextKey{}, "tenant-a")
