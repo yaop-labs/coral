@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,11 +23,12 @@ type dedupEntry struct {
 
 // dedupWindow is bounded by entries and TTL; keys are tenant/signal scoped.
 type dedupWindow struct {
-	mu    sync.Mutex
-	max   int
-	ttl   time.Duration
-	now   func() time.Time
-	items map[string]dedupEntry
+	mu        sync.Mutex
+	max       int
+	ttl       time.Duration
+	now       func() time.Time
+	items     map[string]dedupEntry
+	evictions atomic.Uint64
 }
 
 func newDedupWindow(max int, ttl time.Duration) *dedupWindow {
@@ -73,12 +75,15 @@ func (d *dedupWindow) checkLocked(tenant, signal, id string, payload []byte, rem
 	if len(d.items) >= d.max {
 		for k := range d.items {
 			delete(d.items, k)
+			d.evictions.Add(1)
 			break
 		}
 	}
 	d.items[key] = dedupEntry{hash: hash, expires: now.Add(d.ttl)}
 	return dedupNew
 }
+
+func (d *dedupWindow) Evictions() uint64 { return d.evictions.Load() }
 
 func (d *dedupWindow) remember(tenant, signal, id string, payload []byte) {
 	_ = d.check(tenant, signal, id, payload)

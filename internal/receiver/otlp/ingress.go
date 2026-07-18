@@ -157,6 +157,7 @@ type Server struct {
 	logsRejected   atomic.Uint64
 	dedupHits      atomic.Uint64
 	dedupConflicts atomic.Uint64
+	dedupMisses    atomic.Uint64
 }
 
 type deliveryIDContextKey struct{}
@@ -381,6 +382,9 @@ func (s *Server) dedupGRPC(ctx context.Context, signal string, payload proto.Mes
 	if result == dedupConflict {
 		s.dedupConflicts.Add(1)
 	}
+	if result == dedupNew {
+		s.dedupMisses.Add(1)
+	}
 	return result, nil
 }
 
@@ -425,6 +429,9 @@ func (s *Server) dedupHTTP(req *http.Request, signal string, body []byte) (dedup
 	}
 	if result == dedupConflict {
 		s.dedupConflicts.Add(1)
+	}
+	if result == dedupNew {
+		s.dedupMisses.Add(1)
 	}
 	return result, key, nil
 }
@@ -728,8 +735,8 @@ func (s *Server) Stats() (requests, errs, traces, points, logs uint64) {
 		s.tracesAccepted.Load(), s.pointsAccepted.Load(), s.logsAccepted.Load()
 }
 
-func (s *Server) DedupStats() (hits, conflicts uint64) {
-	return s.dedupHits.Load(), s.dedupConflicts.Load()
+func (s *Server) DedupStats() (hits, conflicts, misses, evictions uint64) {
+	return s.dedupHits.Load(), s.dedupConflicts.Load(), s.dedupMisses.Load(), s.dedup.Evictions()
 }
 
 // Rejected reports records refused at accept time and reported via
