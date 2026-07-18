@@ -108,16 +108,18 @@ func quotaExceeded(ctx context.Context, limits map[string]TenantLimit, items int
 // (contract §2). It replaces the former per-signal receivers so a stock OTel
 // SDK — which sends every signal to a single endpoint — just works.
 type Server struct {
-	grpcAddr     string
-	httpAddr     string
-	maxRecv      int
-	sink         Sink
-	tenantMap    map[string]string
-	tenantLimits map[string]TenantLimit
-	dedup        *dedupWindow
-	journal      *journal.Journal
-	grpcSecurity edge.ServerConfig
-	httpSecurity edge.ServerConfig
+	grpcAddr      string
+	httpAddr      string
+	maxRecv       int
+	sink          Sink
+	tenantMap     map[string]string
+	tenantLimits  map[string]TenantLimit
+	tenantStatsMu sync.Mutex
+	tenantStats   map[string]TenantCounters
+	dedup         *dedupWindow
+	journal       *journal.Journal
+	grpcSecurity  edge.ServerConfig
+	httpSecurity  edge.ServerConfig
 
 	grpcSrv       *grpc.Server
 	httpSrv       *http.Server
@@ -166,6 +168,45 @@ type TenantLimit struct {
 	MaxBytes int64
 }
 
+type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
+
+func makeTenantStats(m map[string]string) map[string]TenantCounters {
+	out := make(map[string]TenantCounters, len(m))
+	for _, tenant := range m {
+		if tenant != "" {
+			out[tenant] = TenantCounters{}
+		}
+	}
+	return out
+}
+func (s *Server) recordTenant(tenant string, accepted, rejected, quota bool) {
+	s.tenantStatsMu.Lock()
+	defer s.tenantStatsMu.Unlock()
+	c, ok := s.tenantStats[tenant]
+	if !ok {
+		return
+	}
+	if accepted {
+		c.Accepted++
+	}
+	if rejected {
+		c.Rejected++
+	}
+	if quota {
+		c.QuotaRejected++
+	}
+	s.tenantStats[tenant] = c
+}
+func (s *Server) TenantStats() map[string]TenantCounters {
+	s.tenantStatsMu.Lock()
+	defer s.tenantStatsMu.Unlock()
+	out := make(map[string]TenantCounters, len(s.tenantStats))
+	for k, v := range s.tenantStats {
+		out[k] = v
+	}
+	return out
+}
+
 // NewSecureServer builds an ingress with optional TLS/mTLS and bearer-token
 // authentication independently configurable for gRPC and HTTP.
 func NewSecureServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security SecurityConfig) (*Server, error) {
@@ -207,6 +248,7 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		sink:         sink,
 		tenantMap:    security.TenantMap,
 		tenantLimits: security.TenantLimits,
+		tenantStats:  makeTenantStats(security.TenantMap),
 		journal:      admissionJournal,
 		dedup:        newDedupWindow(100000, 15*time.Minute),
 		grpcSecurity: security.GRPC,
