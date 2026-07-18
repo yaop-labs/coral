@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -17,6 +18,7 @@ var ErrFull = errors.New("journal byte limit exceeded")
 type Journal struct {
 	mu       sync.Mutex
 	f        *os.File
+	path     string
 	syncFn   func() error
 	maxBytes int64
 	size     int64
@@ -87,7 +89,7 @@ func Open(path string, maxBytes int64) (*Journal, error) {
 		_ = f.Close()
 		return nil, ErrFull
 	}
-	return &Journal{f: f, syncFn: f.Sync, maxBytes: maxBytes, size: st.Size()}, nil
+	return &Journal{f: f, path: path, syncFn: f.Sync, maxBytes: maxBytes, size: st.Size()}, nil
 }
 
 func (j *Journal) Append(payload []byte) error {
@@ -199,15 +201,33 @@ func (j *Journal) Stats() (bytes, maxBytes int64) {
 func (j *Journal) Compact() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if err := j.f.Truncate(0); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(j.path), ".coral-journal-*")
+	if err != nil {
 		return err
 	}
-	if _, err := j.f.Seek(0, io.SeekEnd); err != nil {
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	if err := j.syncFn(); err != nil {
+	if err = tmp.Close(); err != nil {
 		return err
 	}
+	if err = j.syncFn(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpPath, j.path); err != nil {
+		return err
+	}
+	if err = j.f.Close(); err != nil {
+		return err
+	}
+	j.f, err = os.OpenFile(j.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	j.syncFn = j.f.Sync
 	j.size = 0
 	return nil
 }
