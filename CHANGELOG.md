@@ -57,6 +57,8 @@ tested, documented increment.
   request before downstream handoff.
 - Reconciled Increment 10 progress with the implemented metric bounds and
   observability; series/temporality/Amber work remains explicitly open.
+- Metric redaction now also scrubs exemplar filtered attributes, preserving the
+  configured privacy policy across all supported metric datapoint types.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 

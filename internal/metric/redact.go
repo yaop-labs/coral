@@ -47,22 +47,31 @@ func (p *RedactProcessor) Process(_ context.Context, b Batch) (Batch, error) {
 func (p *RedactProcessor) Close() error { return nil }
 
 func (p *RedactProcessor) redactDataPoints(m *metricspb.Metric) {
+	redactExemplars := func(exemplars []*metricspb.Exemplar) {
+		for _, exemplar := range exemplars {
+			p.r.RedactKeyValues(exemplar.GetFilteredAttributes())
+		}
+	}
 	switch d := m.GetData().(type) {
 	case *metricspb.Metric_Gauge:
 		for _, dp := range d.Gauge.GetDataPoints() {
 			p.r.RedactKeyValues(dp.Attributes)
+			redactExemplars(dp.GetExemplars())
 		}
 	case *metricspb.Metric_Sum:
 		for _, dp := range d.Sum.GetDataPoints() {
 			p.r.RedactKeyValues(dp.Attributes)
+			redactExemplars(dp.GetExemplars())
 		}
 	case *metricspb.Metric_Histogram:
 		for _, dp := range d.Histogram.GetDataPoints() {
 			p.r.RedactKeyValues(dp.Attributes)
+			redactExemplars(dp.GetExemplars())
 		}
 	case *metricspb.Metric_ExponentialHistogram:
 		for _, dp := range d.ExponentialHistogram.GetDataPoints() {
 			p.r.RedactKeyValues(dp.Attributes)
+			redactExemplars(dp.GetExemplars())
 		}
 	case *metricspb.Metric_Summary:
 		for _, dp := range d.Summary.GetDataPoints() {

@@ -31,6 +31,7 @@ func TestRedactProcessor_ScrubsCredentialsAcrossScopes(t *testing.T) {
 					stringKV("session", longToken),
 				},
 				TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 7},
+				Exemplars: []*metricspb.Exemplar{{FilteredAttributes: []*commonpb.KeyValue{stringKV("api_key", "exemplar-secret")}}},
 			}}}},
 		}}}},
 	}}}
@@ -53,6 +54,10 @@ func TestRedactProcessor_ScrubsCredentialsAcrossScopes(t *testing.T) {
 	}
 	if v, _ := attrVal(dp, "session"); v != otlpredact.RedactedValue {
 		t.Errorf("long-token datapoint attr not redacted: %q", v)
+	}
+	exemplar := b.ResourceMetrics[0].ScopeMetrics[0].Metrics[0].GetGauge().DataPoints[0].Exemplars[0].FilteredAttributes
+	if v, _ := attrVal(exemplar, "api_key"); v != otlpredact.RedactedValue {
+		t.Errorf("exemplar attribute not redacted: %q", v)
 	}
 }
 
