@@ -9,7 +9,7 @@ part of Coral.
 | Component | Contract/version | Coral relationship | Current status |
 |---|---|---|---|
 | Gyre | v0.5.0 | Operational lifecycle, readiness, status, typed errors, and resource identity | `App` implements `gyre.Component`; standard health/readiness/status endpoints are mounted. Runtime, reload, admin, and resource layering are not adopted yet. |
-| Reef | v0.1.0 | TLS, mTLS, bearer verification, and client transport construction | Used by OTLP ingress and HTTP exporters. Authentication proves only that a configured token matched; it does not produce an organisation/project principal. |
+| Reef | v0.3.0 | TLS, mTLS, bearer principals, credential rotation, and complete edge policy | Production edge APIs protect OTLP, self-observability, and HTTP exporters. Reef supplies a named principal; Coral does not yet map it to an organisation/project. |
 | Wisp | v0.7.0 stable; v0.8.x delivery contract under development | Durable edge sender of standard OTLP | Standard OTLP works without Wisp headers. `x-wisp-envelope-id` and `x-wisp-signal-kind` are not consumed yet; deduplication is therefore not claimed. |
 | Amber | Contract requires separate verification | Durable telemetry destination | Coral exports to Amber, but acknowledgement after Coral ingress is not proof of Amber durable admission. |
 | Fathom | Contract requires separate verification | Derived/analysis destination | Coral exports independently from the Amber lane; it does not assign Fathom storage or query responsibilities to itself. |
@@ -42,16 +42,16 @@ silently rewrite incoming OTLP resource identity.
 Reef owns transport security. Gyre status may report bounded security
 conditions, but cannot validate certificates, tokens, or rotation itself.
 
-Coral remains on Reef v0.1.0 in this increment. Reef v0.3.0 adds unified edge
-policy and observable last-known-good credential rotation. Adopting it is not a
-dependency bump only: its fail-closed plaintext policy, health-path exemptions,
-credential lifecycle, and principal/audit hooks require a Coral config
-compatibility review and negative transport tests.
+Coral adopts Reef v0.3.0 unified edge policy and observable last-known-good
+credential rotation. External plaintext and bearer exposure require explicit
+opt-ins; HTTP exporter credentials are origin-bound. The migration is in
+`docs/REEF_V0.3_MIGRATION.md`.
 
-Reef v0.1 bearer validation does not expose the matched credential as a
-principal. Consequently Coral is authenticated but not multi-tenant. Tenant
-identity must be server-derived from a reviewed Reef/Coral identity adapter;
-payload attributes and Wisp envelope IDs cannot select a tenant.
+Reef exposes the matched credential name as a principal, but that name is not
+automatically an organisation/project. Consequently Coral is authenticated but
+not yet multi-tenant. Tenant identity must be server-derived from a reviewed
+Reef/Coral mapping; payload attributes and Wisp envelope IDs cannot select a
+tenant.
 
 ## Wisp boundary
 

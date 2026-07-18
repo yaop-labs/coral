@@ -101,6 +101,15 @@ tested; docs and platform matrix match code; CI is green on feature and main.
 **Compatibility.** Additive except the Go toolchain floor moves from 1.26.3 to
 Gyre v0.5.0's required 1.26.5. Reef v0.1.0 and all OTLP contracts are unchanged.
 
+## Increment 2.1 — Reef v0.3 production security edges
+
+Adopt Reef v0.3.0 before tenant identity: fail-closed external plaintext,
+explicit bearer-over-plaintext risk acceptance, managed last-known-good
+certificate/CA/token rotation, authenticated principal propagation,
+origin-bound exporters, bounded credential metrics, and lifecycle cleanup.
+This is a self-contained compatibility increment and does not make Reef
+principals into tenants. See ADR 0003 and the Reef migration guide.
+
 ## Increment 3 — bounded lifecycle and truthful pipeline telemetry
 
 **Goal.** Make startup, backpressure, draining, and capacity observable and
