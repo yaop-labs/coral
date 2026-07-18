@@ -1,12 +1,13 @@
 module github.com/yaop-labs/coral
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.18
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.102.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/yaop-labs/gyre v0.5.0
 	github.com/yaop-labs/reef v0.1.0
 	go.opentelemetry.io/proto/otlp v1.10.0
 	google.golang.org/grpc v1.81.1

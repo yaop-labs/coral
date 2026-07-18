@@ -173,12 +173,18 @@ Close force-keeps all pending traces, so shutdown changes sampling semantics.
 There are no counters for forced decisions, late spans, evictions, or kept/dropped
 items.
 
-### P2 — lifecycle, release, and supply chain baseline is absent
+### Resolved baseline finding — lifecycle metadata, CI, and release artifacts
 
-There are no Git tags, GitHub workflows, release scripts, artifact checksums,
-container build, SBOM/provenance, changelog, build/version injection, or
-dependency update policy. The local `main` and `origin/main` have diverged, and
-the active conformance branch is 18 commits ahead of local `main`.
+The reviewed commit had no GitHub workflow, release script, artifact checksum,
+changelog, or build/version injection. Increment 1 added build identity,
+readiness/queue metrics, CI gates, and deterministic cross-platform archives.
+The final `main` commit
+`d99a4dbe21fd9c3562936a763e66bb9ae1dec1ee` passed GitHub Actions run
+`29625160872`.
+
+Gyre lifecycle conformance was still absent at that baseline. Increment 2 now
+tracks the direct Gyre v0.5.0 component adoption; the cross-platform contract
+split is documented in `docs/PLATFORM_COMPATIBILITY.md`.
 
 The module declares Go 1.26.3. Offline dependency enumeration succeeds, but the
 network-based available-update/retraction check could not run in the restricted
@@ -227,8 +233,10 @@ compatibility story are in `docs/ROADMAP.md`.
 - Amber can provide an unambiguous durable-admission response for each signal.
   Its current contract and version must be checked before durable ACK semantics
   are implemented.
-- Platform control-plane data can supply stable organisation/project IDs and
-  credential mappings without changing Gyre v0.5.0 contracts.
+- A future platform identity source can supply stable organisation/project IDs
+  and credential mappings. Gyre v0.5.0 is explicitly not that authority; it
+  owns operational lifecycle/resource contracts, while Reef owns transport
+  security.
 - A 24-hour default Wisp deduplication TTL is likely adequate for Wisp retry and
   restart horizons. It is a roadmap proposal, not a current contract.
 - A single-node journal is a useful first durable increment; horizontal scaling

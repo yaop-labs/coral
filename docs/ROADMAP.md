@@ -9,16 +9,20 @@ complete, compatible, documented, and green.
 
 ## Current baseline
 
-The active conformance branch provides unified OTLP gRPC/HTTP, traces/metrics/logs,
-Reef TLS and bearer authentication, count-bounded queues, isolated exporter
-lanes, classified HTTP retry, trace oversize partial success, basic
-self-observation, and legacy Jaeger/Zipkin trace ingestion.
+`main` at `d99a4dbe21fd9c3562936a763e66bb9ae1dec1ee` provides unified OTLP
+gRPC/HTTP for traces/metrics/logs, Reef TLS and bearer authentication,
+count-bounded queues, isolated exporter lanes, classified HTTP retry, trace
+oversize partial success, legacy Jaeger/Zipkin ingestion, build identity,
+readiness/queue metrics, CI, and deterministic release archives.
 
 The baseline is not durable or multi-tenant. It has no Wisp envelope support,
-storage/query API, CI/release artifacts, or complete OTLP trace fidelity. See
-`docs/REVIEW.md` for evidence and priority.
+storage/query API, or complete OTLP trace fidelity. Gyre v0.5.0 lifecycle
+adoption is the active feature increment. See `docs/REVIEW.md` for evidence and
+`docs/PLATFORM_COMPATIBILITY.md` for cross-repository boundaries.
 
 ## Increment 1 — operational identity and continuous verification
+
+Status: completed and merged to `main`; final commit and CI are recorded above.
 
 **Goal.** Make every binary identifiable and every proposed change subject to a
 reproducible, automated minimum gate.
@@ -53,7 +57,45 @@ exact main commit's CI is verified.
 
 **Compatibility.** Additive. Development builds report `dev`/`unknown`.
 
-## Increment 2 — bounded lifecycle and truthful pipeline telemetry
+## Increment 2 — Gyre v0.5.0 lifecycle conformance
+
+**Goal.** Make Coral a real Gyre component and remove lifecycle leaks before
+adding tenant or durability state.
+
+**Boundaries.** Implement `gyre.Component` directly on the Coral app; standardize
+state, readiness, status, typed errors, partial-start rollback, and close
+semantics. Mount Gyre operational endpoints. Do not mount Gyre Admin, implement
+reload, change Reef policy, or alter OTLP.
+
+**Public contracts.** Additive `/status` JSON using `gyre.Snapshot`. Existing
+`/healthz`, `/readyz`, `Start`, and `Shutdown` remain; `Shutdown` is an alias for
+Gyre `Close`. Go consumers gain the `gyre.Component` interface.
+
+**Storage/migrations.** None. Static configuration uses generation zero and
+does not claim `gyre.Reloadable`.
+
+**Security model.** Status uses static bounded reasons and contains no config,
+endpoint, token, certificate, or arbitrary error text. Gyre Admin remains
+disabled until Reef protection and audit are designed.
+
+**Failure semantics.** Failed startup rolls back completed stages in reverse
+order. `Close` is safe before `Start`, idempotent, and returns on caller
+deadline while the single cleanup operation continues. Errors use Gyre codes.
+
+**Observability.** Standard state/since/condition status plus existing
+`coral_ready` and bounded readiness-state metrics.
+
+**Test strategy.** `gyre.ConformanceCheck`, lifecycle ordering, repeated close,
+typed errors, status endpoint, failed-listener rollback, full race suite.
+
+**Done when.** No listener survives injected late startup failure; close before
+start and repeated close are safe; Gyre endpoints and typed readiness are
+tested; docs and platform matrix match code; CI is green on feature and main.
+
+**Compatibility.** Additive except the Go toolchain floor moves from 1.26.3 to
+Gyre v0.5.0's required 1.26.5. Reef v0.1.0 and all OTLP contracts are unchanged.
+
+## Increment 3 — bounded lifecycle and truthful pipeline telemetry
 
 **Goal.** Make startup, backpressure, draining, and capacity observable and
 deadline-bounded before adding durability.
@@ -91,7 +133,7 @@ consistent over gRPC/HTTP.
 **Compatibility.** Existing valid configs remain valid. Newly rejected values
 were previously unsafe/ambiguous and receive a migration note.
 
-## Increment 3 — lossless standard OTLP trace path
+## Increment 4 — lossless standard OTLP trace path
 
 **Goal.** Preserve all standard OTLP trace fields before Wisp enables durable
 traces.
@@ -128,7 +170,7 @@ ingest/process/export except for configured transformations.
 **Compatibility.** Wire-compatible and fidelity-increasing. Downstream contract
 checks are mandatory; no Gyre/Reef/Wisp changes.
 
-## Increment 4 — authenticated organisation/project identity
+## Increment 5 — authenticated organisation/project identity
 
 **Goal.** Establish a tenant context on every admitted request.
 
@@ -168,7 +210,7 @@ project, and no test can cross tenant boundaries.
 **Compatibility.** Single-tenant compatibility mode accepts existing clients.
 Multi-tenant activation is opt-in until migration is complete.
 
-## Increment 5 — Wisp delivery identity and bounded deduplication
+## Increment 6 — Wisp delivery identity and bounded deduplication
 
 **Goal.** Safely consume optional Wisp delivery metadata without excluding
 standard OTLP clients.
@@ -211,7 +253,7 @@ and Wisp v0.8.x compatibility is verified without changing Wisp.
 **Compatibility.** Additive for clients without headers. Present invalid
 headers begin failing deliberately; release notes call this out.
 
-## Increment 6 — durable admission journal
+## Increment 7 — durable admission journal
 
 **Goal.** Close the Wisp → Coral → Amber acknowledgement gap.
 
@@ -222,7 +264,7 @@ space for metadata/compaction.
 
 **Public contracts.** Admission success means journal durability, not downstream
 query visibility. At-least-once delivery permits duplicates at documented
-crash/response-loss/TTL boundaries. The Wisp envelope contract from increment 5
+crash/response-loss/TTL boundaries. The Wisp envelope contract from increment 6
 remains optional.
 
 **Storage/migrations.** Versioned records with tenant, signal, envelope identity
@@ -256,7 +298,7 @@ disk is bounded, and recovery/migration/rollback tests pass.
 guide. A temporary memory mode may remain for development but is never reported
 durable or production-ready.
 
-## Increment 7 — quotas, admission fairness, and complete OTLP partial success
+## Increment 8 — quotas, admission fairness, and complete OTLP partial success
 
 **Goal.** Prevent one tenant or signal from exhausting shared capacity and make
 every rejection protocol-correct.
@@ -293,7 +335,7 @@ the documented admission state.
 **Compatibility.** Default quotas are permissive within global safety bounds;
 tightening is an operator-controlled policy change.
 
-## Increment 8 — logs capability contract
+## Increment 9 — logs capability contract
 
 **Goal.** Provide safe log admission and explicit downstream storage/query
 integration without turning Coral into the log store.
@@ -328,7 +370,7 @@ semantics and verified Amber retrieval/retention behavior.
 **Compatibility.** Policy defaults preserve fields; enabling loss/redaction is
 explicit and documented.
 
-## Increment 9 — metrics capability contract
+## Increment 10 — metrics capability contract
 
 **Goal.** Admit metrics safely with bounded label cardinality and verified Amber
 time-series semantics.
@@ -362,7 +404,7 @@ downsampling/retention behavior is verified.
 **Compatibility.** Fidelity-preserving defaults; limits roll out with observe
 then enforce modes.
 
-## Increment 10 — traces, assembly, correlation, and sampling
+## Increment 11 — traces, assembly, correlation, and sampling
 
 **Goal.** Add production trace semantics after lossless transport and durable
 admission are established.
@@ -396,7 +438,7 @@ boundaries and all state is bounded/recoverable.
 **Compatibility.** Existing tail-sampling config receives a migration path;
 behavior changes are not silently applied.
 
-## Increment 11 — platform API and administration support
+## Increment 12 — platform API and administration support
 
 **Goal.** Expose only the stable Coral administration surface needed by the
 platform.
@@ -429,7 +471,7 @@ duplicating telemetry query ownership.
 **Compatibility.** Additive v1 administration namespace; no Gyre v0.5.0 change
 without separate compatibility work.
 
-## Increment 12 — production depth and horizontal scale
+## Increment 13 — production depth and horizontal scale
 
 **Goal.** Operate Coral predictably across upgrades, failures, and capacity
 growth.
