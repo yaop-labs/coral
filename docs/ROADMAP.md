@@ -248,6 +248,10 @@ checks are mandatory; no Gyre/Reef/Wisp changes.
 
 ## Increment 5 — authenticated organisation/project identity
 
+Progress: Reef principal propagation, configured principal→tenant allowlist,
+immutable tenant context, and bounded tenant limits are implemented. Full
+organisation/project versioned model and downstream tenant propagation remain.
+
 **Goal.** Establish a tenant context on every admitted request.
 
 **Boundaries.** Add Coral-owned credential-to-organisation/project mapping or a
@@ -396,6 +400,10 @@ guide. A temporary memory mode may remain for development but is never reported
 durable or production-ready.
 
 ## Increment 8 — quotas, admission fairness, and complete OTLP partial success
+
+Progress: bounded per-tenant item/byte admission limits and tenant-isolated
+outcome counters are implemented. Fair scheduling, rate/concurrency quotas,
+and complete downstream partial-success handling remain.
 
 **Goal.** Prevent one tenant or signal from exhausting shared capacity and make
 every rejection protocol-correct.
