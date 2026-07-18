@@ -265,6 +265,20 @@ func TestTailSampler_MaxTraces_Evicts(t *testing.T) {
 	}
 }
 
+func TestTailSampler_MaxBytes_Evicts(t *testing.T) {
+	ts := NewTail(time.Minute, 100, 1.0, nil, func(context.Context, model.Batch) error { return nil }, 100)
+	ts.Process(context.Background(), model.Batch{Spans: []model.Span{{TraceID: model.TraceID{1}, Name: "large"}}})
+	ts.Process(context.Background(), model.Batch{Spans: []model.Span{{TraceID: model.TraceID{2}, Name: "large"}}})
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.pending) > 1 {
+		t.Fatalf("pending traces = %d, want byte-bounded eviction", len(ts.pending))
+	}
+	if ts.currentBytes > ts.maxBytes {
+		t.Fatalf("current bytes = %d, max = %d", ts.currentBytes, ts.maxBytes)
+	}
+}
+
 func TestTailSampler_ServiceRule_Keeps(t *testing.T) {
 	var mu sync.Mutex
 	var exported []model.Span
