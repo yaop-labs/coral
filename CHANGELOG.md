@@ -61,6 +61,8 @@ tested, documented increment.
   configured privacy policy across all supported metric datapoint types.
 - Added end-to-end Amber exporter coverage proving metric exemplar fields are
   preserved through Coral processing.
+- Fixed tail sampler byte accounting when max-trace eviction occurs; added a
+  regression test for bounded pending state.
 - Added Amber exporter coverage proving cumulative Sum temporality and
   monotonicity are preserved without implicit conversion.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag

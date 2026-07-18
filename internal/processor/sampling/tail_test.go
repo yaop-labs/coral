@@ -265,6 +265,21 @@ func TestTailSampler_MaxTraces_Evicts(t *testing.T) {
 	}
 }
 
+func TestTailSampler_MaxTracesKeepsByteAccounting(t *testing.T) {
+	ts := NewTail(time.Hour, 1, 1, nil, func(context.Context, model.Batch) error { return nil }, 1<<20)
+	ctx := context.Background()
+	first := traceSpan(1, 1, model.StatusOK)
+	second := traceSpan(2, 2, model.StatusOK)
+	if _, err := ts.Process(ctx, model.Batch{Spans: []model.Span{first, second}}); err != nil {
+		t.Fatal(err)
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.currentBytes != pendingBytes(ts.pending[second.TraceID]) {
+		t.Fatalf("current bytes = %d, want pending second trace bytes %d", ts.currentBytes, pendingBytes(ts.pending[second.TraceID]))
+	}
+}
+
 func TestTailSampler_MaxBytes_Evicts(t *testing.T) {
 	ts := NewTail(time.Minute, 100, 1.0, nil, func(context.Context, model.Batch) error { return nil }, 100)
 	ts.Process(context.Background(), model.Batch{Spans: []model.Span{{TraceID: model.TraceID{1}, Name: "large"}}})

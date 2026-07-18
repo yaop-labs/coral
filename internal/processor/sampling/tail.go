@@ -130,6 +130,7 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 		if !ok {
 			if len(ts.pending) >= ts.maxTraces {
 				if evicted := ts.evictOldestLocked(); evicted != nil {
+					ts.currentBytes -= pendingBytes(evicted)
 					d := ts.decide(evicted)
 					ts.decided.Add(evicted.ID, d)
 					if d == decisionKeep {
