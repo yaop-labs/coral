@@ -58,6 +58,9 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 				TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 7},
 				Exemplars: []*metricspb.Exemplar{{TimeUnixNano: 2, Value: &metricspb.Exemplar_AsDouble{AsDouble: 3.5}, FilteredAttributes: []*commonpb.KeyValue{stringKV("trace_id", "abc")}}},
 			}}}},
+		}, {
+			Name: "requests_total",
+			Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{IsMonotonic: true, AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, DataPoints: []*metricspb.NumberDataPoint{{TimeUnixNano: 2, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 9}}}}},
 		}}}},
 	}}}
 	// Export runs the processor chain and exporters synchronously in this
@@ -91,6 +94,10 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	exemplar := m.GetGauge().DataPoints[0].GetExemplars()[0]
 	if exemplar.GetTimeUnixNano() != 2 || exemplar.GetAsDouble() != 3.5 {
 		t.Errorf("exemplar not preserved: %+v", exemplar)
+	}
+	sum := got.ResourceMetrics[0].ScopeMetrics[0].Metrics[1].GetSum()
+	if !sum.GetIsMonotonic() || sum.GetAggregationTemporality() != metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE {
+		t.Fatalf("sum temporality changed: %+v", sum)
 	}
 }
 
