@@ -1,8 +1,11 @@
 package otlp
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/yaop-labs/coral/internal/journal"
 )
 
 func TestDedupWindowTenantSignalAndConflict(t *testing.T) {
@@ -59,5 +62,30 @@ func TestDedupLookupDoesNotRemember(t *testing.T) {
 	}
 	if d.lookup("tenant", "metrics", "id", []byte("payload")) != dedupHit {
 		t.Fatal("lookup missed remembered identity")
+	}
+}
+
+func TestReplayRoutedRestoresDeliveryIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admission.journal")
+	j, err := journal.Open(path, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("durable-payload")
+	if err := j.Append(journal.EncodeEnvelope(journal.Envelope{Signal: "traces", Tenant: "tenant-a", DeliveryID: "0123456789abcdef0123456789abcdef", Payload: payload, CreatedUnixNano: time.Now().UnixNano()})); err != nil {
+		t.Fatal(err)
+	}
+	_ = j.Close()
+
+	s, err := NewSecureServer("", "", 0, Sink{}, SecurityConfig{JournalPath: path, JournalMaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.journal.Close()
+	if err := s.ReplayRouted(func(journal.Envelope) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.dedup.lookup("tenant-a", "traces", "0123456789abcdef0123456789abcdef", payload); got != dedupHit {
+		t.Fatalf("restored dedup result = %v, want hit", got)
 	}
 }

@@ -29,6 +29,8 @@ tested, documented increment.
   path and bounded hit/conflict observability.
 - Added backward-compatible journal v3 delivery identity fields and replay
   restoration into the bounded Wisp dedup window for gRPC and HTTP admissions.
+- Added an end-to-end replay regression test proving restored delivery IDs
+  produce dedup hits before new admission.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and
