@@ -497,6 +497,19 @@ func TestIngress_HTTP_PrincipalPropagationAndTokenRotation(t *testing.T) {
 	}
 }
 
+func TestTenantQuotaExceeded(t *testing.T) {
+	ctx := context.WithValue(context.Background(), tenantContextKey{}, "tenant-a")
+	if !quotaExceeded(ctx, map[string]TenantLimit{"tenant-a": {MaxItems: 1}}, 2, 0) {
+		t.Fatal("item quota not enforced")
+	}
+	if !quotaExceeded(ctx, map[string]TenantLimit{"tenant-a": {MaxBytes: 10}}, 1, 11) {
+		t.Fatal("byte quota not enforced")
+	}
+	if quotaExceeded(ctx, map[string]TenantLimit{"tenant-b": {MaxItems: 1}}, 2, 0) {
+		t.Fatal("quota crossed tenant boundary")
+	}
+}
+
 func postTraceWithToken(t *testing.T, address, token string) int {
 	t.Helper()
 	body, err := proto.Marshal(traceReq())
