@@ -2,10 +2,40 @@ package journal
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestJournalProcessCrashRecovery(t *testing.T) {
+	if os.Getenv("CORAL_JOURNAL_CRASH_HELPER") == "1" {
+		j, err := Open(os.Getenv("CORAL_JOURNAL_CRASH_PATH"), 1024)
+		if err != nil {
+			os.Exit(2)
+		}
+		_ = j.Append(EncodeEnvelope(Envelope{Signal: "traces", Tenant: "t", Payload: []byte("crash")}))
+		os.Exit(0)
+	}
+	p := filepath.Join(t.TempDir(), "crash.log")
+	cmd := exec.Command(os.Args[0], "-test.run=TestJournalProcessCrashRecovery")
+	cmd.Env = append(os.Environ(), "CORAL_JOURNAL_CRASH_HELPER=1", "CORAL_JOURNAL_CRASH_PATH="+p)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("helper: %v", err)
+	}
+	j, err := Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var count int
+	if err = j.Recover(func(raw []byte) error { count++; _, err := DecodeEnvelope(raw); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("recovered=%d", count)
+	}
+}
 
 func TestJournalAppendReplayAndReopen(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "j.log")
