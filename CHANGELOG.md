@@ -27,6 +27,16 @@ tested, documented increment.
   bounded credential event/generation metrics.
 - Authenticated Reef principal propagation and exporter origin/redirect
   containment.
+- Bounded pipeline admission by item count and bytes across traces, metrics,
+  logs, and exporter lanes.
+- Lossless OTLP trace metadata preservation through Fathom, including raw
+  events, links, scope/schema, flags, and dropped-field counts.
+- Tenant principal allowlists, per-tenant item/byte request limits, and
+  explicit tenant context propagation.
+- Optional Wisp envelope validation and bounded tenant/signal-aware two-phase
+  deduplication with hit/conflict counters.
+- Bounded CRC-protected fsync admission journal with replay and pressure
+  snapshots.
 
 ### Changed
 
