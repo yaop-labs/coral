@@ -527,3 +527,23 @@ func TestPipeline_Shutdown_Idempotent(t *testing.T) {
 		t.Fatalf("second Shutdown: %v", err)
 	}
 }
+
+type closeTrackingExporter struct{ closed bool }
+
+func (*closeTrackingExporter) Export(context.Context, model.Batch) error { return nil }
+func (e *closeTrackingExporter) Close() error {
+	e.closed = true
+	return nil
+}
+
+func TestPipeline_CloseUnstartedReleasesExporter(t *testing.T) {
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
+	exp := &closeTrackingExporter{}
+	p.AddExporter(exp)
+	if err := p.CloseUnstarted(); err != nil {
+		t.Fatalf("CloseUnstarted: %v", err)
+	}
+	if !exp.closed {
+		t.Fatal("exporter was not closed")
+	}
+}

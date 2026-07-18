@@ -3,6 +3,7 @@ package logs
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -11,7 +12,7 @@ import (
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 
-	"github.com/yaop-labs/reef/reefclient"
+	"github.com/yaop-labs/reef/edge"
 )
 
 // AmberExporter posts OTLP log requests to amber's /v1/logs endpoint. amber is
@@ -21,13 +22,14 @@ type AmberExporter struct {
 	url    string
 	client *http.Client
 	retry  RetryPolicy
+	edge   io.Closer
 }
 
-func NewAmberExporter(endpoint string, timeout time.Duration, retry RetryPolicy, options ...reefclient.Config) (*AmberExporter, error) {
+func NewAmberExporter(endpoint string, timeout time.Duration, retry RetryPolicy, options ...edge.ClientConfig) (*AmberExporter, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("amber log exporter: endpoint required")
 	}
-	client, err := exporterHTTPClient(timeout, options)
+	client, managed, err := exporterHTTPClient(endpoint, timeout, options)
 	if err != nil {
 		return nil, fmt.Errorf("amber log exporter transport: %w", err)
 	}
@@ -35,7 +37,7 @@ func NewAmberExporter(endpoint string, timeout time.Duration, retry RetryPolicy,
 	if !strings.HasSuffix(url, "/v1/logs") {
 		url += "/v1/logs"
 	}
-	return &AmberExporter{url: url, client: client, retry: retry}, nil
+	return &AmberExporter{url: url, client: client, retry: retry, edge: managed}, nil
 }
 
 func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
@@ -52,4 +54,9 @@ func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
 	})
 }
 
-func (e *AmberExporter) Close() error { return nil }
+func (e *AmberExporter) Close() error {
+	if e.edge == nil {
+		return nil
+	}
+	return e.edge.Close()
+}

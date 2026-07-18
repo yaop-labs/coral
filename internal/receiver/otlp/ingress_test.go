@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +33,8 @@ import (
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/reef/bearer"
+	"github.com/yaop-labs/reef/credential"
+	"github.com/yaop-labs/reef/edge"
 )
 
 // capture records what each signal sink received.
@@ -337,7 +341,10 @@ func TestIngress_HTTP_JSONResponseMatchesRequestEncoding(t *testing.T) {
 func TestIngress_HTTP_BearerAuth(t *testing.T) {
 	c := &capture{}
 	s, err := NewSecureServer("", "127.0.0.1:0", 0, c.sink(), SecurityConfig{
-		HTTPAuth: &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "test", Token: "test-token"}}},
+		HTTP: edge.ServerConfig{
+			Auth:                           &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "test", Token: "test-token"}}},
+			DangerAllowBearerOverPlaintext: true,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -376,7 +383,10 @@ func TestIngress_HTTP_BearerAuth(t *testing.T) {
 func TestIngress_GRPC_BearerAuth(t *testing.T) {
 	c := &capture{}
 	s, err := NewSecureServer("127.0.0.1:0", "", 0, c.sink(), SecurityConfig{
-		GRPCAuth: &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "test", Token: "test-token"}}},
+		GRPC: edge.ServerConfig{
+			Auth:                           &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "test", Token: "test-token"}}},
+			DangerAllowBearerOverPlaintext: true,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -398,6 +408,113 @@ func TestIngress_GRPC_BearerAuth(t *testing.T) {
 	if _, err := client.Export(ctx, traceReq()); err != nil {
 		t.Fatalf("authenticated export: %v", err)
 	}
+}
+
+func TestIngress_RejectsUnsafeExternalPlaintext(t *testing.T) {
+	_, err := NewSecureServer("", "0.0.0.0:4318", 0, (&capture{}).sink(), SecurityConfig{
+		HTTP: edge.ServerConfig{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "insecure: true") {
+		t.Fatalf("NewSecureServer error = %v, want explicit insecure opt-in", err)
+	}
+
+	_, err = NewSecureServer("", "127.0.0.1:0", 0, (&capture{}).sink(), SecurityConfig{
+		HTTP: edge.ServerConfig{
+			Auth: &bearer.ServerConfig{Bearer: []bearer.Key{{Name: "wisp", Token: "secret"}}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "danger_allow_bearer_over_plaintext") {
+		t.Fatalf("bearer plaintext error = %v, want explicit danger opt-in", err)
+	}
+}
+
+func TestIngress_HTTP_PrincipalPropagationAndTokenRotation(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("old-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	principals := make(chan string, 2)
+	events := make(chan credential.Event, 4)
+	sink := Sink{Traces: func(ctx context.Context, _ model.Batch) error {
+		principal, _ := bearer.PrincipalFromContext(ctx)
+		principals <- principal
+		return nil
+	}}
+	s, err := NewSecureServer("", "127.0.0.1:0", 0, sink, SecurityConfig{
+		HTTP: edge.ServerConfig{
+			Auth: &bearer.ServerConfig{Bearer: []bearer.Key{{
+				Name:      "wisp-project-a",
+				TokenFile: tokenFile,
+			}}},
+			DangerAllowBearerOverPlaintext: true,
+			ReloadInterval:                 time.Hour,
+			Observer: credential.ObserverFunc(func(event credential.Event) {
+				events <- event
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.Stop(ctx)
+	})
+
+	if code := postTraceWithToken(t, s.HTTPAddr(), "old-token"); code != http.StatusOK {
+		t.Fatalf("old token status = %d, want 200", code)
+	}
+	if principal := <-principals; principal != "wisp-project-a" {
+		t.Fatalf("principal = %q", principal)
+	}
+	if err := os.WriteFile(tokenFile, []byte("new-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReloadCredentials(); err != nil {
+		t.Fatalf("ReloadCredentials: %v", err)
+	}
+	if code := postTraceWithToken(t, s.HTTPAddr(), "old-token"); code != http.StatusUnauthorized {
+		t.Fatalf("rotated old token status = %d, want 401", code)
+	}
+	if code := postTraceWithToken(t, s.HTTPAddr(), "new-token"); code != http.StatusOK {
+		t.Fatalf("new token status = %d, want 200", code)
+	}
+	if principal := <-principals; principal != "wisp-project-a" {
+		t.Fatalf("rotated principal = %q", principal)
+	}
+
+	statuses := s.CredentialStatus()
+	if len(statuses) != 1 || statuses[0].Generation != 2 || statuses[0].LastError != "" {
+		t.Fatalf("credential statuses = %+v", statuses)
+	}
+	initial, changed := <-events, <-events
+	if !initial.Success || !changed.Success || !changed.Changed || changed.Status.Generation != 2 {
+		t.Fatalf("credential events = initial:%+v changed:%+v", initial, changed)
+	}
+}
+
+func postTraceWithToken(t *testing.T, address, token string) int {
+	t.Helper()
+	body, err := proto.Marshal(traceReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://"+address+"/v1/traces", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
 }
 
 // TestIngress_GRPC_PartialSuccess is the gRPC counterpart.

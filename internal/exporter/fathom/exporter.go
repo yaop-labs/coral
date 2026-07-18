@@ -14,24 +14,27 @@ import (
 
 	"github.com/yaop-labs/coral/internal/exporter/backoff"
 	"github.com/yaop-labs/coral/internal/model"
-	"github.com/yaop-labs/reef/reefclient"
+	"github.com/yaop-labs/coral/internal/reefedge"
+	"github.com/yaop-labs/reef/edge"
 )
 
 // Exporter posts OTLP trace requests to fathom's /v1/traces endpoint.
 type Exporter struct {
 	url    string
 	client *http.Client
+	edge   io.Closer
 }
 
-func New(endpoint string, timeout time.Duration, options ...reefclient.Config) (*Exporter, error) {
+func New(endpoint string, timeout time.Duration, options ...edge.ClientConfig) (*Exporter, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("fathom exporter: endpoint required")
 	}
-	var clientCfg reefclient.Config
+	var clientCfg edge.ClientConfig
 	if len(options) > 0 {
 		clientCfg = options[0]
 	}
-	client, err := newHTTPClient(timeout, clientCfg)
+	clientCfg.Target = endpoint
+	client, managed, err := newHTTPClient(timeout, clientCfg)
 	if err != nil {
 		return nil, fmt.Errorf("fathom exporter transport: %w", err)
 	}
@@ -39,7 +42,7 @@ func New(endpoint string, timeout time.Duration, options ...reefclient.Config) (
 	if !strings.HasSuffix(url, "/v1/traces") {
 		url += "/v1/traces"
 	}
-	return &Exporter{url: url, client: client}, nil
+	return &Exporter{url: url, client: client, edge: managed}, nil
 }
 
 func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
@@ -70,15 +73,13 @@ func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
 	return nil
 }
 
-func (e *Exporter) Close() error { return nil }
+func (e *Exporter) Close() error {
+	if e.edge == nil {
+		return nil
+	}
+	return e.edge.Close()
+}
 
-func newHTTPClient(timeout time.Duration, cfg reefclient.Config) (*http.Client, error) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	rt, err := reefclient.Transport(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return &http.Client{Timeout: timeout, Transport: rt}, nil
+func newHTTPClient(timeout time.Duration, cfg edge.ClientConfig) (*http.Client, io.Closer, error) {
+	return reefedge.NewHTTPClient(timeout, cfg, nil)
 }

@@ -7,6 +7,7 @@ receivers:
     endpoint: "0.0.0.0:6831"
   otlp_grpc:
     endpoint: "0.0.0.0:4317"
+    insecure: true # replace with TLS outside development
 
 processors:
   - type: validate

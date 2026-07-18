@@ -21,6 +21,12 @@ tested, documented increment.
   rollback of listeners after a failed startup.
 - A versioned platform compatibility matrix for Gyre, Reef, Wisp, Amber, and
   Fathom boundaries.
+- Reef v0.3 production edges for OTLP, self-observability, and all HTTP
+  exporters.
+- Managed last-known-good certificate, CA, and bearer-token reload with
+  bounded credential event/generation metrics.
+- Authenticated Reef principal propagation and exporter origin/redirect
+  containment.
 
 ### Changed
 
@@ -29,3 +35,5 @@ tested, documented increment.
 - Partial startup now rolls back completed stages in reverse order; shutdown is
   idempotent and bounded at the public Gyre boundary.
 - The minimum Go toolchain is 1.26.5, matching Gyre v0.5.0.
+- External plaintext now requires `insecure: true`; bearer over plaintext also
+  requires `danger_allow_bearer_over_plaintext: true`.

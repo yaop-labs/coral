@@ -14,7 +14,8 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 
 	"github.com/yaop-labs/coral/internal/exporter/backoff"
-	"github.com/yaop-labs/reef/reefclient"
+	"github.com/yaop-labs/coral/internal/reefedge"
+	"github.com/yaop-labs/reef/edge"
 )
 
 // RetryPolicy is the shared retry policy; classification and backoff live in
@@ -26,13 +27,14 @@ type FathomExporter struct {
 	url    string
 	client *http.Client
 	retry  RetryPolicy
+	edge   io.Closer
 }
 
-func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy, options ...reefclient.Config) (*FathomExporter, error) {
+func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy, options ...edge.ClientConfig) (*FathomExporter, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("fathom log exporter: endpoint required")
 	}
-	client, err := exporterHTTPClient(timeout, options)
+	client, managed, err := exporterHTTPClient(endpoint, timeout, options)
 	if err != nil {
 		return nil, fmt.Errorf("fathom log exporter transport: %w", err)
 	}
@@ -40,7 +42,7 @@ func NewFathomExporter(endpoint string, timeout time.Duration, retry RetryPolicy
 	if !strings.HasSuffix(url, "/v1/logs") {
 		url += "/v1/logs"
 	}
-	return &FathomExporter{url: url, client: client, retry: retry}, nil
+	return &FathomExporter{url: url, client: client, retry: retry, edge: managed}, nil
 }
 
 func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
@@ -57,7 +59,12 @@ func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
 	})
 }
 
-func (e *FathomExporter) Close() error { return nil }
+func (e *FathomExporter) Close() error {
+	if e.edge == nil {
+		return nil
+	}
+	return e.edge.Close()
+}
 
 // post sends one OTLP/protobuf log request and classifies the outcome per §4.
 func post(ctx context.Context, client *http.Client, url, who string, body []byte) error {
@@ -79,17 +86,11 @@ func post(ctx context.Context, client *http.Client, url, who string, body []byte
 	return nil
 }
 
-func exporterHTTPClient(timeout time.Duration, options []reefclient.Config) (*http.Client, error) {
-	var cfg reefclient.Config
+func exporterHTTPClient(endpoint string, timeout time.Duration, options []edge.ClientConfig) (*http.Client, io.Closer, error) {
+	var cfg edge.ClientConfig
 	if len(options) > 0 {
 		cfg = options[0]
 	}
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	rt, err := reefclient.Transport(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return &http.Client{Timeout: timeout, Transport: rt}, nil
+	cfg.Target = endpoint
+	return reefedge.NewHTTPClient(timeout, cfg, nil)
 }

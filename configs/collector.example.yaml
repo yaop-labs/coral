@@ -10,8 +10,10 @@ pipeline:
 receivers:
   otlp_grpc:
     endpoint: "0.0.0.0:4317"
+    insecure: true # explicit development-only plaintext opt-in
   otlp_http:
     endpoint: "0.0.0.0:4318"
+    insecure: true # explicit development-only plaintext opt-in
   jaeger_thrift_udp:
     endpoint: "0.0.0.0:6831"
     max_packet_size: 65000
@@ -74,6 +76,7 @@ exporters:
 
 metrics:
   endpoint: "0.0.0.0:4888"
+  insecure: true # explicit development-only plaintext opt-in
 
 # Metrics pipeline (wisp → coral → amber), fed by the shared OTLP ingress above.
 # It enriches resource attributes and forwards to amber over OTLP/HTTP.

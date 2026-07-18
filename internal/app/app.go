@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -29,7 +30,9 @@ import (
 	otlprecv "github.com/yaop-labs/coral/internal/receiver/otlp"
 	zipkinrecv "github.com/yaop-labs/coral/internal/receiver/zipkin"
 	"github.com/yaop-labs/gyre"
-	"github.com/yaop-labs/reef/reefclient"
+	"github.com/yaop-labs/reef/bearer"
+	"github.com/yaop-labs/reef/credential"
+	"github.com/yaop-labs/reef/edge"
 	"github.com/yaop-labs/reef/tlsconf"
 )
 
@@ -40,12 +43,14 @@ type App struct {
 
 	metricPipeline *metric.Pipeline // nil unless metric_pipeline is configured
 	logPipeline    *logs.Pipeline   // nil unless log_pipeline is configured
+	credentialObs  *credentialMetrics
 
 	// ingress is the unified OTLP endpoint (4317/4318) feeding every signal
 	// pipeline; nil when no OTLP receiver is configured. Legacy Jaeger/Zipkin
 	// trace receivers remain attached directly to the trace pipeline.
-	ingress *otlprecv.Server
-	hooks   []lifecycleHook
+	ingress     *otlprecv.Server
+	hooks       []lifecycleHook
+	selfObsAddr string
 
 	lifecycleMu sync.Mutex
 	statusMu    sync.RWMutex
@@ -95,10 +100,11 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 
 	now := time.Now().UTC()
 	a := &App{
-		logger:   logger,
-		pipeline: p,
-		state:    gyre.StateStarting,
-		since:    now,
+		logger:        logger,
+		pipeline:      p,
+		credentialObs: &credentialMetrics{},
+		state:         gyre.StateStarting,
+		since:         now,
 		condition: gyre.Condition{
 			Type:           "Ready",
 			Status:         false,
@@ -107,12 +113,20 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 			LastTransition: now,
 		},
 	}
+	constructed := false
+	defer func() {
+		if !constructed {
+			a.closeUnstarted()
+		}
+	}()
 
 	if err := a.addReceivers(p, cfg.Receivers, logger); err != nil {
 		return nil, err
 	}
 	if cfg.Metrics.Endpoint != "" {
-		a.addMetricsServer(p, cfg.Metrics.Endpoint)
+		if err := a.addMetricsServer(p, cfg.Metrics); err != nil {
+			return nil, fmt.Errorf("metrics: %w", err)
+		}
 		logger.Info("metrics endpoint enabled", "endpoint", cfg.Metrics.Endpoint)
 	}
 
@@ -138,7 +152,7 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 	}
 
 	if cfg.MetricPipeline != nil {
-		mp, err := buildMetricPipeline(*cfg.MetricPipeline, cfg.Pipeline, logger)
+		mp, err := buildMetricPipeline(*cfg.MetricPipeline, cfg.Pipeline, logger, a.credentialObs)
 		if err != nil {
 			return nil, fmt.Errorf("metric_pipeline: %w", err)
 		}
@@ -146,7 +160,7 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		logger.Info("metric pipeline enabled")
 	}
 	if cfg.LogPipeline != nil {
-		lp, err := buildLogPipeline(*cfg.LogPipeline, cfg.Pipeline, logger)
+		lp, err := buildLogPipeline(*cfg.LogPipeline, cfg.Pipeline, logger, a.credentialObs)
 		if err != nil {
 			return nil, fmt.Errorf("log_pipeline: %w", err)
 		}
@@ -157,7 +171,24 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 	if err := a.addIngress(cfg.Receivers, traceActive, validateSpanLimit(cfg.Processors)); err != nil {
 		return nil, fmt.Errorf("otlp ingress: %w", err)
 	}
+	constructed = true
 	return a, nil
+}
+
+func (a *App) closeUnstarted() {
+	if a.logPipeline != nil {
+		if err := a.logPipeline.CloseUnstarted(); err != nil {
+			a.logger.Error("close unstarted log pipeline", "err", err)
+		}
+	}
+	if a.metricPipeline != nil {
+		if err := a.metricPipeline.CloseUnstarted(); err != nil {
+			a.logger.Error("close unstarted metric pipeline", "err", err)
+		}
+	}
+	if err := a.pipeline.CloseUnstarted(); err != nil {
+		a.logger.Error("close unstarted trace pipeline", "err", err)
+	}
 }
 
 // addIngress builds the unified OTLP endpoint from the top-level receiver
@@ -170,15 +201,11 @@ func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool, spanLimit
 	security := otlprecv.SecurityConfig{}
 	if cfg.OTLPGRPC != nil {
 		grpcAddr = cfg.OTLPGRPC.Endpoint
-		security.GRPCTLS = cfg.OTLPGRPC.TLS
-		security.GRPCAuth = cfg.OTLPGRPC.Auth
-		tlsconf.WarnIfPlaintext(a.logger, "otlp-grpc-receiver", cfg.OTLPGRPC.TLS != nil && cfg.OTLPGRPC.TLS.Enabled)
+		security.GRPC = serverEdgeConfig(*cfg.OTLPGRPC, a.credentialObs)
 	}
 	if cfg.OTLPHTTP != nil {
 		httpAddr = cfg.OTLPHTTP.Endpoint
-		security.HTTPTLS = cfg.OTLPHTTP.TLS
-		security.HTTPAuth = cfg.OTLPHTTP.Auth
-		tlsconf.WarnIfPlaintext(a.logger, "otlp-http-receiver", cfg.OTLPHTTP.TLS != nil && cfg.OTLPHTTP.TLS.Enabled)
+		security.HTTP = serverEdgeConfig(*cfg.OTLPHTTP, a.credentialObs)
 	}
 	if grpcAddr == "" && httpAddr == "" {
 		return nil
@@ -248,7 +275,12 @@ func traceSizeAdmit(maxSpanBytes int) func(model.Batch) (model.Batch, int, strin
 	}
 }
 
-func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*metric.Pipeline, error) {
+func buildMetricPipeline(
+	cfg config.MetricPipelineConfig,
+	base config.PipelineConfig,
+	logger *slog.Logger,
+	observer credential.Observer,
+) (*metric.Pipeline, error) {
 	mp := metric.NewPipeline(base.Workers, base.QueueSize, logger)
 	mp.AddProcessor(metric.NewServiceNameProcessor()) // contract §6
 
@@ -280,8 +312,7 @@ func buildMetricPipeline(cfg config.MetricPipelineConfig, base config.PipelineCo
 	}
 
 	for _, exporterCfg := range metricExporters(cfg) {
-		warnExporterPlaintext(logger, exporterCfg.Type, "metrics", exporterCfg.TLS)
-		exp, err := buildMetricExporter(exporterCfg)
+		exp, err := buildMetricExporter(exporterCfg, observer)
 		if err != nil {
 			return nil, err
 		}
@@ -300,7 +331,7 @@ func metricExporters(cfg config.MetricPipelineConfig) []config.MetricExporterCon
 	return nil
 }
 
-func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, error) {
+func buildMetricExporter(cfg config.MetricExporterConfig, observer credential.Observer) (metric.Exporter, error) {
 	retry := metric.RetryPolicy{
 		MaxAttempts:    cfg.Retry.MaxAttempts,
 		InitialBackoff: cfg.Retry.InitialBackoff.Std(),
@@ -308,15 +339,24 @@ func buildMetricExporter(cfg config.MetricExporterConfig) (metric.Exporter, erro
 	}
 	switch cfg.Type {
 	case "", "amber":
-		return metric.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
+		return metric.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, clientEdgeConfig(
+			cfg.Endpoint, cfg.TLS, cfg.Auth, cfg.EdgePolicyConfig, observer,
+		))
 	case "fathom":
-		return metric.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
+		return metric.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, clientEdgeConfig(
+			cfg.Endpoint, cfg.TLS, cfg.Auth, cfg.EdgePolicyConfig, observer,
+		))
 	default:
 		return nil, fmt.Errorf("metric exporter: unknown type %q", cfg.Type)
 	}
 }
 
-func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, logger *slog.Logger) (*logs.Pipeline, error) {
+func buildLogPipeline(
+	cfg config.LogPipelineConfig,
+	base config.PipelineConfig,
+	logger *slog.Logger,
+	observer credential.Observer,
+) (*logs.Pipeline, error) {
 	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger)
 	lp.AddProcessor(logs.NewServiceNameProcessor()) // contract §6
 
@@ -338,8 +378,7 @@ func buildLogPipeline(cfg config.LogPipelineConfig, base config.PipelineConfig, 
 	}
 
 	for _, exporterCfg := range logExporters(cfg) {
-		warnExporterPlaintext(logger, exporterCfg.Type, "logs", exporterCfg.TLS)
-		exp, err := buildLogExporter(exporterCfg)
+		exp, err := buildLogExporter(exporterCfg, observer)
 		if err != nil {
 			return nil, err
 		}
@@ -358,7 +397,7 @@ func logExporters(cfg config.LogPipelineConfig) []config.LogExporterConfig {
 	return nil
 }
 
-func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
+func buildLogExporter(cfg config.LogExporterConfig, observer credential.Observer) (logs.Exporter, error) {
 	retry := logs.RetryPolicy{
 		MaxAttempts:    cfg.Retry.MaxAttempts,
 		InitialBackoff: cfg.Retry.InitialBackoff.Std(),
@@ -366,9 +405,13 @@ func buildLogExporter(cfg config.LogExporterConfig) (logs.Exporter, error) {
 	}
 	switch cfg.Type {
 	case "", "amber":
-		return logs.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
+		return logs.NewAmberExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, clientEdgeConfig(
+			cfg.Endpoint, cfg.TLS, cfg.Auth, cfg.EdgePolicyConfig, observer,
+		))
 	case "fathom":
-		return logs.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
+		return logs.NewFathomExporter(cfg.Endpoint, cfg.Timeout.Std(), retry, clientEdgeConfig(
+			cfg.Endpoint, cfg.TLS, cfg.Auth, cfg.EdgePolicyConfig, observer,
+		))
 	default:
 		return nil, fmt.Errorf("log exporter: unknown type %q", cfg.Type)
 	}
@@ -389,6 +432,9 @@ func (a *App) OTLPGRPCAddr() string {
 	}
 	return a.ingress.GRPCAddr()
 }
+
+// SelfObservabilityAddr returns the bound operational HTTP address for tests.
+func (a *App) SelfObservabilityAddr() string { return a.selfObsAddr }
 
 // Name returns Coral's stable Gyre component identity.
 func (a *App) Name() string { return "coral" }
@@ -615,16 +661,45 @@ func (a *App) transition(state gyre.State, reason, message string) {
 	}
 }
 
-func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], endpoint string) {
+func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], cfg config.MetricsConfig) error {
 	var srv *http.Server
+	var secured *edge.HTTPServer
+	edgeConfig := edge.ServerConfig{
+		Bind:                           cfg.Endpoint,
+		TLS:                            cfg.TLS,
+		Auth:                           cfg.Auth,
+		Insecure:                       cfg.Insecure,
+		DangerAllowBearerOverPlaintext: cfg.DangerAllowBearerOverPlaintext,
+		ReloadInterval:                 cfg.CredentialReloadInterval.Std(),
+		Observer:                       a.credentialObs,
+	}
+	warnings, err := edge.ValidateServer(edgeConfig)
+	if err != nil {
+		return err
+	}
+	for _, warning := range warnings {
+		a.logger.Warn("reef self-observability configuration warning", "warning", string(warning))
+	}
 	a.hooks = append(a.hooks, lifecycleHook{
 		start: func(ctx context.Context) error {
-			ln, err := net.Listen("tcp", endpoint)
+			ln, err := net.Listen("tcp", cfg.Endpoint)
 			if err != nil {
-				return fmt.Errorf("metrics: listen %s: %w", endpoint, err)
+				return fmt.Errorf("metrics: listen %s: %w", cfg.Endpoint, err)
+			}
+			a.selfObsAddr = ln.Addr().String()
+			secured, err = edge.NewHTTPServer(edgeConfig)
+			if err != nil {
+				_ = ln.Close()
+				return err
+			}
+			for _, warning := range secured.Warnings {
+				a.logger.Warn("reef self-observability configuration warning", "warning", string(warning))
+			}
+			if secured.TLSConfig != nil {
+				ln = tls.NewListener(ln, secured.TLSConfig.Clone())
 			}
 			srv = &http.Server{
-				Handler:           a.selfObsMux(p),
+				Handler:           secured.Middleware(a.selfObsMux(p)),
 				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       10 * time.Second,
 				WriteTimeout:      10 * time.Second,
@@ -643,9 +718,10 @@ func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], endpoint strin
 			if srv == nil {
 				return nil
 			}
-			return srv.Shutdown(ctx)
+			return errors.Join(srv.Shutdown(ctx), secured.Close())
 		},
 	})
+	return nil
 }
 
 // selfObsMux serves the operational endpoints: Prometheus-text /metrics
@@ -705,6 +781,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_points counter\ncoral_otlp_rejected_points %d\n", rejPoints)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_records counter\ncoral_otlp_rejected_records %d\n", rejRecords)
 		}
+		a.credentialObs.writePrometheus(w)
 	})
 	mux.Handle("/", gyre.HTTPHandler(a))
 	return mux
@@ -861,8 +938,9 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 		if err := ec.Raw.Decode(&cfg); err != nil {
 			return nil, err
 		}
-		warnExporterPlaintext(a.logger, "amber", "traces", cfg.TLS)
-		e, err := amberexp.New(cfg.Endpoint, cfg.Timeout.Std(), reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
+		e, err := amberexp.New(cfg.Endpoint, cfg.Timeout.Std(), clientEdgeConfig(
+			cfg.Endpoint, cfg.TLS, cfg.Auth, cfg.EdgePolicyConfig, a.credentialObs,
+		))
 		if err != nil {
 			return nil, err
 		}
@@ -877,8 +955,9 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 		if err := ec.Raw.Decode(&cfg); err != nil {
 			return nil, err
 		}
-		warnExporterPlaintext(a.logger, "fathom", "traces", cfg.TLS)
-		e, err := fathomexp.New(cfg.Endpoint, cfg.Timeout.Std(), reefclient.Config{TLS: cfg.TLS, Auth: cfg.Auth})
+		e, err := fathomexp.New(cfg.Endpoint, cfg.Timeout.Std(), clientEdgeConfig(
+			cfg.Endpoint, cfg.TLS, cfg.Auth, cfg.EdgePolicyConfig, a.credentialObs,
+		))
 		if err != nil {
 			return nil, err
 		}
@@ -914,9 +993,31 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 	}
 }
 
-func warnExporterPlaintext(logger *slog.Logger, exporterType, signal string, cfg *tlsconf.ClientConfig) {
-	if exporterType == "" {
-		exporterType = "amber"
+func serverEdgeConfig(cfg config.OTLPEndpointConfig, observer credential.Observer) edge.ServerConfig {
+	return edge.ServerConfig{
+		TLS:                            cfg.TLS,
+		Auth:                           cfg.Auth,
+		Insecure:                       cfg.Insecure,
+		DangerAllowBearerOverPlaintext: cfg.DangerAllowBearerOverPlaintext,
+		ReloadInterval:                 cfg.CredentialReloadInterval.Std(),
+		Observer:                       observer,
 	}
-	tlsconf.WarnIfPlaintext(logger, exporterType+"-"+signal+"-exporter", cfg != nil && cfg.Enabled)
+}
+
+func clientEdgeConfig(
+	target string,
+	tlsConfig *tlsconf.ClientConfig,
+	authConfig *bearer.ClientConfig,
+	policy config.EdgePolicyConfig,
+	observer credential.Observer,
+) edge.ClientConfig {
+	return edge.ClientConfig{
+		Target:                         target,
+		TLS:                            tlsConfig,
+		Auth:                           authConfig,
+		Insecure:                       policy.Insecure,
+		DangerAllowBearerOverPlaintext: policy.DangerAllowBearerOverPlaintext,
+		ReloadInterval:                 policy.CredentialReloadInterval.Std(),
+		Observer:                       observer,
+	}
 }
