@@ -46,8 +46,28 @@ type Config struct {
 
 // PipelineConfig configures pipeline concurrency.
 type PipelineConfig struct {
-	Workers   int `yaml:"workers"`
-	QueueSize int `yaml:"queue_size"`
+	Workers    int   `yaml:"workers"`
+	QueueSize  int   `yaml:"queue_size"`
+	QueueBytes int64 `yaml:"queue_bytes"`
+}
+
+const (
+	maxPipelineWorkers    = 1024
+	maxPipelineQueueSize  = 1_000_000
+	maxPipelineQueueBytes = 1 << 40
+)
+
+func (c PipelineConfig) validate() error {
+	if c.Workers < 0 || c.Workers > maxPipelineWorkers {
+		return fmt.Errorf("pipeline.workers must be between 0 and %d", maxPipelineWorkers)
+	}
+	if c.QueueSize < 0 || c.QueueSize > maxPipelineQueueSize {
+		return fmt.Errorf("pipeline.queue_size must be between 0 and %d", maxPipelineQueueSize)
+	}
+	if c.QueueBytes < 0 || c.QueueBytes > maxPipelineQueueBytes {
+		return fmt.Errorf("pipeline.queue_bytes must be between 0 and %d", maxPipelineQueueBytes)
+	}
+	return nil
 }
 
 // ReceiversConfig configures trace receivers.
@@ -263,6 +283,9 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Pipeline.validate(); err != nil {
+		return err
+	}
 	otlpIngress := c.Receivers.OTLPGRPC != nil || c.Receivers.OTLPHTTP != nil
 	anyTraceReceiver := c.Receivers.AnyEnabled()
 	metricActive := c.MetricPipeline != nil

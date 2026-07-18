@@ -163,6 +163,9 @@ pipeline drain migration guide.
 
 ## Increment 3b — bounded admission and per-destination capacity
 
+Status: in progress. The first slice validates pipeline worker and queue bounds
+before application construction; byte admission and lane accounting follow.
+
 **Goal.** Bound all in-memory telemetry retention in bytes as well as item
 counts and make each fan-out destination diagnosable.
 

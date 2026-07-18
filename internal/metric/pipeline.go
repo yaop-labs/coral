@@ -9,6 +9,7 @@ import (
 	"log/slog"
 
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/pipeline"
 )
@@ -30,6 +31,14 @@ func (b Batch) Len() int {
 				n += metricPoints(m)
 			}
 		}
+	}
+	return n
+}
+
+func (b Batch) SizeBytes() int {
+	n := 0
+	for _, rm := range b.ResourceMetrics {
+		n += proto.Size(rm)
 	}
 	return n
 }
@@ -61,6 +70,10 @@ type (
 )
 
 // NewPipeline builds a metric pipeline over the shared generic worker-pool.
-func NewPipeline(workers, queueSize int, logger *slog.Logger) *Pipeline {
-	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize}, logger)
+func NewPipeline(workers, queueSize int, logger *slog.Logger, queueBytes ...int64) *Pipeline {
+	var bytes int64
+	if len(queueBytes) > 0 {
+		bytes = queueBytes[0]
+	}
+	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize, QueueBytes: bytes}, logger)
 }

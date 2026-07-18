@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/pipeline"
 )
@@ -31,6 +32,14 @@ func (b Batch) Len() int {
 	return n
 }
 
+func (b Batch) SizeBytes() int {
+	n := 0
+	for _, rl := range b.ResourceLogs {
+		n += proto.Size(rl)
+	}
+	return n
+}
+
 // Pipeline, Receiver, Processor, and Exporter are the log-signal
 // instantiations of the generic pipeline types.
 type (
@@ -41,6 +50,10 @@ type (
 )
 
 // NewPipeline builds a log pipeline over the shared generic worker-pool.
-func NewPipeline(workers, queueSize int, logger *slog.Logger) *Pipeline {
-	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize}, logger)
+func NewPipeline(workers, queueSize int, logger *slog.Logger, queueBytes ...int64) *Pipeline {
+	var bytes int64
+	if len(queueBytes) > 0 {
+		bytes = queueBytes[0]
+	}
+	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize, QueueBytes: bytes}, logger)
 }
