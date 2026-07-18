@@ -45,3 +45,19 @@ func TestDedupWindowTTLAndBoundedEviction(t *testing.T) {
 		t.Fatalf("expired entries = %d, want 0", len(d.items))
 	}
 }
+
+func TestDedupLookupDoesNotRemember(t *testing.T) {
+	d := newDedupWindow(4, time.Minute)
+	if d.lookup("tenant", "metrics", "id", []byte("payload")) != dedupNew {
+		t.Fatal("lookup unexpectedly hit")
+	}
+	if d.lookup("tenant", "metrics", "id", []byte("payload")) != dedupNew {
+		t.Fatal("lookup remembered an identity")
+	}
+	if d.check("tenant", "metrics", "id", []byte("payload")) != dedupNew {
+		t.Fatal("check did not admit new identity")
+	}
+	if d.lookup("tenant", "metrics", "id", []byte("payload")) != dedupHit {
+		t.Fatal("lookup missed remembered identity")
+	}
+}
