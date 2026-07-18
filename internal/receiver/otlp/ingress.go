@@ -355,6 +355,13 @@ func (s *Server) CompactJournal() error {
 	return s.journal.Compact()
 }
 
+func (s *Server) CompactJournalOlderThan(age time.Duration) error {
+	if s.journal == nil {
+		return nil
+	}
+	return s.journal.CompactOlderThan(age)
+}
+
 func (s *Server) JournalStats() (bytes, maxBytes int64) {
 	if s.journal == nil {
 		return 0, 0
