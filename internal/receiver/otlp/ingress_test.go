@@ -538,6 +538,13 @@ func TestMetricAttributeCountBound(t *testing.T) {
 	}
 }
 
+func TestMetricAttributeKeyCardinality(t *testing.T) {
+	req := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{{Key: "same"}, {Key: "same"}, {Key: "other"}}}}}}
+	if got := metricAttributeKeyCount(req, 2); got != 2 {
+		t.Fatalf("metric attribute keys = %d, want 2", got)
+	}
+}
+
 func TestTenantConcurrentAdmission(t *testing.T) {
 	s := &Server{tenantLimits: map[string]TenantLimit{"tenant-a": {MaxConcurrent: 1}}, tenantStats: map[string]TenantCounters{"tenant-a": {}}}
 	ctx := context.WithValue(context.Background(), tenantContextKey{}, "tenant-a")
