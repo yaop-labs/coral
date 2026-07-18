@@ -540,10 +540,6 @@ func (a *App) Start(ctx context.Context) error {
 	// The ingress starts last: every pipeline it feeds is already consuming, so
 	// no Enqueue can race a not-yet-started worker pool.
 	if a.ingress != nil {
-		if err := a.ingress.Start(); err != nil {
-			return a.startFailed("otlp_ingress", err)
-		}
-		a.ingressStarted = true
 		if err := a.ingress.ReplayRouted(func(env journal.Envelope) error {
 			return otlprecv.ReplayEnvelope(ctx, env, otlprecv.ReplaySinks{
 				Traces: a.pipeline.Enqueue,
@@ -566,6 +562,10 @@ func (a *App) Start(ctx context.Context) error {
 		if err := a.ingress.CompactJournal(); err != nil {
 			return a.startFailed("journal_compact", err)
 		}
+		if err := a.ingress.Start(); err != nil {
+			return a.startFailed("otlp_ingress", err)
+		}
+		a.ingressStarted = true
 	}
 	a.transition(gyre.StateReady, "ready", "component is accepting telemetry")
 	return nil
