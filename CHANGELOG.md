@@ -35,6 +35,8 @@ tested, documented increment.
 - Documented the implemented 15-minute/100,000-entry dedup boundary instead of
   the stale 24-hour proposal.
 - Added bounded dedup miss and capacity-eviction counters to the server stats.
+- Added configurable per-tenant `max_log_record_bytes`; oversized records are
+  rejected before sink/journal with permanent `InvalidArgument`/`400` semantics.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 

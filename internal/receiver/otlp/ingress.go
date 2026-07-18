@@ -41,11 +41,14 @@ var (
 	errTenantQuota       = errors.New("tenant quota exceeded")
 	errTenantConcurrency = errors.New("tenant concurrency quota exceeded")
 	errTenantRate        = errors.New("tenant request rate quota exceeded")
+	errLogRecordTooLarge = errors.New("log record exceeds tenant limit")
 )
 
 func admissionOverload(err error) bool {
 	return errors.Is(err, errTenantQuota) || errors.Is(err, errTenantConcurrency) || errors.Is(err, errTenantRate)
 }
+
+func admissionPermanent(err error) bool { return errors.Is(err, errLogRecordTooLarge) }
 
 const defaultMaxRecvBytes = 16 << 20
 
@@ -198,6 +201,7 @@ type TenantLimit struct {
 	MaxBytes             int64
 	MaxConcurrent        int
 	MaxRequestsPerSecond int
+	MaxLogRecordBytes    int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -833,6 +837,19 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 	}
 	defer release()
 	b := logs.Batch{ResourceLogs: rl}
+	if tenant, ok := TenantFromContext(ctx); ok {
+		if limit := s.tenantLimits[tenant].MaxLogRecordBytes; limit > 0 {
+			for _, resource := range rl {
+				for _, scope := range resource.GetScopeLogs() {
+					for _, record := range scope.GetLogRecords() {
+						if proto.Size(record) > limit {
+							return 0, "", errLogRecordTooLarge
+						}
+					}
+				}
+			}
+		}
+	}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
 		if tenant, ok := TenantFromContext(ctx); ok {
 			s.recordTenant(tenant, false, false, true)
@@ -877,6 +894,9 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
 		g.s.errs.Add(1)
+		if admissionPermanent(err) {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 		if admissionOverload(err) {
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
 		}
@@ -912,6 +932,9 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
+		if admissionPermanent(err) {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 		if admissionOverload(err) {
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
 		}
@@ -947,6 +970,9 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {
 		g.s.errs.Add(1)
+		if admissionPermanent(err) {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 		if admissionOverload(err) {
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
 		}
@@ -1001,7 +1027,9 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 	rejected, reason, err := s.admitTraces(req.Context(), spans)
 	if err != nil {
 		s.errs.Add(1)
-		if admissionOverload(err) {
+		if admissionPermanent(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		} else if admissionOverload(err) {
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 		} else {
 			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
@@ -1055,7 +1083,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 	rejected, reason, err := s.admitMetrics(req.Context(), pb.GetResourceMetrics())
 	if err != nil {
 		s.errs.Add(1)
-		if admissionOverload(err) {
+		if admissionPermanent(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		} else if admissionOverload(err) {
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 		} else {
 			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
@@ -1109,7 +1139,9 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 	rejected, reason, err := s.admitLogs(req.Context(), pb.GetResourceLogs())
 	if err != nil {
 		s.errs.Add(1)
-		if admissionOverload(err) {
+		if admissionPermanent(err) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		} else if admissionOverload(err) {
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 		} else {
 			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)

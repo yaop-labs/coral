@@ -54,6 +54,7 @@ type TenantLimit struct {
 	MaxBytes             int64 `yaml:"max_bytes"`
 	MaxConcurrent        int   `yaml:"max_concurrent"`
 	MaxRequestsPerSecond int   `yaml:"max_requests_per_second"`
+	MaxLogRecordBytes    int   `yaml:"max_log_record_bytes"`
 }
 
 // PipelineConfig configures pipeline concurrency.
@@ -311,6 +312,9 @@ func (c *Config) Validate() error {
 		}
 		if limit.MaxRequestsPerSecond < 0 || limit.MaxRequestsPerSecond > 1000000 {
 			return fmt.Errorf("tenant_limits[%q].max_requests_per_second out of range", tenant)
+		}
+		if limit.MaxLogRecordBytes < 0 || limit.MaxLogRecordBytes > 64<<20 {
+			return fmt.Errorf("tenant_limits[%q].max_log_record_bytes out of range", tenant)
 		}
 	}
 	if c.JournalMaxBytes < 0 || c.JournalMaxBytes > (1<<40) {
