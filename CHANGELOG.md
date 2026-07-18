@@ -21,6 +21,8 @@ tested, documented increment.
   includes fuzz coverage for untrusted envelope bytes.
 - Journal append enforces the same per-record bound, preventing records that
   would be accepted but unreplayable after restart.
+- Fixed dedup window lock ownership so Wisp envelope check/lookup cannot
+  self-deadlock; tenant/signal scoping remains covered by race-tested tests.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and

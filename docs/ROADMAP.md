@@ -436,6 +436,9 @@ identifiers are rejected before append and never acknowledged as durable.
 Replay also rejects oversized individual records before allocation, with fuzz
 coverage for malformed envelope bytes.
 
+Dedup check/lookup lock ownership is race-tested and tenant/signal scoped;
+bounded TTL/entry eviction remains the duplicate boundary.
+
 **Observability.** Admission latency, quota utilization/rejections, partial
 success, request size, decompression ratio, and fairness lag with bounded labels.
 

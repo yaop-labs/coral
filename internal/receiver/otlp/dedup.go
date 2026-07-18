@@ -40,14 +40,10 @@ func newDedupWindow(max int, ttl time.Duration) *dedupWindow {
 }
 
 func (d *dedupWindow) check(tenant, signal, id string, payload []byte) dedupResult {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.checkLocked(tenant, signal, id, payload, true)
 }
 
 func (d *dedupWindow) lookup(tenant, signal, id string, payload []byte) dedupResult {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	return d.checkLocked(tenant, signal, id, payload, false)
 }
 
