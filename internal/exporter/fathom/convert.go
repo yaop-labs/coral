@@ -10,6 +10,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/model"
 )
@@ -48,20 +49,39 @@ func firstNonEmpty(value, fallback string) string {
 }
 
 func spanToProto(s *model.Span) *tracepb.Span {
-	sp := &tracepb.Span{
-		TraceId:                append([]byte(nil), s.TraceID[:]...),
-		SpanId:                 append([]byte(nil), s.SpanID[:]...),
-		Name:                   s.Name,
-		Kind:                   kindToProto(s.Kind),
-		StartTimeUnixNano:      timeToNanos(s.StartTime),
-		EndTimeUnixNano:        timeToNanos(s.EndTime),
-		Attributes:             kvFromAttrs(s.Attrs),
-		Status:                 &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg},
-		Flags:                  s.TraceFlags,
-		DroppedAttributesCount: s.DroppedAttributes,
-		DroppedEventsCount:     s.DroppedEvents,
-		DroppedLinksCount:      s.DroppedLinks,
+	sp := &tracepb.Span{}
+	if len(s.OTLP) > 0 {
+		_ = proto.Unmarshal(s.OTLP, sp)
 	}
+	sp.TraceId = append([]byte(nil), s.TraceID[:]...)
+	sp.SpanId = append([]byte(nil), s.SpanID[:]...)
+	sp.Name = s.Name
+	sp.Kind = kindToProto(s.Kind)
+	sp.StartTimeUnixNano = timeToNanos(s.StartTime)
+	sp.EndTimeUnixNano = timeToNanos(s.EndTime)
+	sp.Attributes = kvFromAttrs(s.Attrs)
+	sp.Status = &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg}
+	sp.Flags = s.TraceFlags
+	sp.DroppedAttributesCount = s.DroppedAttributes
+	sp.DroppedEventsCount = s.DroppedEvents
+	sp.DroppedLinksCount = s.DroppedLinks
+	/* Events and links remain from the original OTLP payload above. */
+	/*
+		sp := &tracepb.Span{
+			TraceId:                append([]byte(nil), s.TraceID[:]...),
+			SpanId:                 append([]byte(nil), s.SpanID[:]...),
+			Name:                   s.Name,
+			Kind:                   kindToProto(s.Kind),
+			StartTimeUnixNano:      timeToNanos(s.StartTime),
+			EndTimeUnixNano:        timeToNanos(s.EndTime),
+			Attributes:             kvFromAttrs(s.Attrs),
+			Status:                 &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg},
+			Flags:                  s.TraceFlags,
+			DroppedAttributesCount: s.DroppedAttributes,
+			DroppedEventsCount:     s.DroppedEvents,
+			DroppedLinksCount:      s.DroppedLinks,
+		}
+	*/
 	if !s.ParentSpanID.IsZero() {
 		sp.ParentSpanId = append([]byte(nil), s.ParentSpanID[:]...)
 	}
