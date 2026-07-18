@@ -340,6 +340,10 @@ before acknowledgement, explicit replay API, lifecycle close, and pressure
 snapshot are implemented. Replay worker, compaction/age TTL, and crash-injected
 end-to-end recovery remain open before marking this increment complete.
 
+Records written before routed envelopes are replayable only through the legacy
+opaque `ReplayAdmission` callback. `ReplayRouted` rejects those records rather
+than guessing a signal or tenant; migration must drain legacy records first.
+
 **Goal.** Close the Wisp → Coral → Amber acknowledgement gap.
 
 **Boundaries.** Persist accepted signal envelopes before OTLP success; replay
