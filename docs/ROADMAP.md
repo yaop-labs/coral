@@ -9,12 +9,12 @@ complete, compatible, documented, and green.
 
 ## Current baseline
 
-`main` at `c8e44f4435927958b5dacb2cfcd81007ef809e2c` provides unified OTLP
-gRPC/HTTP for traces/metrics/logs, Reef TLS and bearer authentication,
-count-bounded queues, isolated exporter lanes, classified HTTP retry, trace
-oversize partial success, legacy Jaeger/Zipkin ingestion, build identity,
-readiness/queue metrics, CI, deterministic release archives, and a
-Gyre v0.5.0-conformant component lifecycle.
+The completed baseline through increment 2.1 provides unified OTLP gRPC/HTTP
+for traces/metrics/logs, Reef v0.3 managed security edges, count-bounded queues,
+isolated exporter lanes, classified HTTP retry, trace oversize partial success,
+legacy Jaeger/Zipkin ingestion, build identity, readiness/queue/credential
+metrics, CI, deterministic release archives, and a Gyre v0.5.0-conformant
+component lifecycle.
 
 The baseline is not durable or multi-tenant. It has no Wisp envelope support,
 storage/query API, or complete OTLP trace fidelity. Bounded drain semantics and
@@ -102,6 +102,8 @@ tested; docs and platform matrix match code; CI is green on feature and main.
 Gyre v0.5.0's required 1.26.5. Reef v0.1.0 and all OTLP contracts are unchanged.
 
 ## Increment 2.1 — Reef v0.3 production security edges
+
+Status: completed.
 
 Adopt Reef v0.3.0 before tenant identity: fail-closed external plaintext,
 explicit bearer-over-plaintext risk acceptance, managed last-known-good
