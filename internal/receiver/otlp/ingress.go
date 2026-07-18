@@ -323,7 +323,7 @@ func (s *Server) appendAdmission(ctx context.Context, signal string, payload []b
 			tenant = mapped
 		}
 	}
-	return s.journal.Append(journal.EncodeEnvelope(journal.Envelope{Signal: signal, Tenant: tenant, Payload: payload}))
+	return s.journal.Append(journal.EncodeEnvelope(journal.Envelope{Signal: signal, Tenant: tenant, Payload: payload, CreatedUnixNano: time.Now().UnixNano()}))
 }
 
 // ReplayAdmission replays durable admission records. The caller supplies the
