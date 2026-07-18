@@ -563,13 +563,6 @@ type grpcTraceService struct {
 
 func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
 	g.s.requests.Add(1)
-	if result, err := g.s.dedupGRPC(ctx, "traces", req); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	} else if result == dedupHit {
-		return &coltracepb.ExportTraceServiceResponse{}, nil
-	} else if result == dedupConflict {
-		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
-	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
@@ -592,13 +585,6 @@ type grpcMetricsService struct {
 
 func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	g.s.requests.Add(1)
-	if result, err := g.s.dedupGRPC(ctx, "metrics", req); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	} else if result == dedupHit {
-		return &colmetricspb.ExportMetricsServiceResponse{}, nil
-	} else if result == dedupConflict {
-		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
-	}
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
@@ -620,13 +606,6 @@ type grpcLogsService struct {
 
 func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
 	g.s.requests.Add(1)
-	if result, err := g.s.dedupGRPC(ctx, "logs", req); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	} else if result == dedupHit {
-		return &collogspb.ExportLogsServiceResponse{}, nil
-	} else if result == dedupConflict {
-		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
-	}
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {
 		g.s.errs.Add(1)

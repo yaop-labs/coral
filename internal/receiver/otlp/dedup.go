@@ -69,6 +69,10 @@ func (d *dedupWindow) check(tenant, signal, id string, payload []byte) dedupResu
 	return dedupNew
 }
 
+func (d *dedupWindow) remember(tenant, signal, id string, payload []byte) {
+	_ = d.check(tenant, signal, id, payload)
+}
+
 func (r dedupResult) String() string {
 	switch r {
 	case dedupHit:
