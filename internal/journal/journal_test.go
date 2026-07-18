@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,17 @@ func TestReplayRejectsOversizedRecordBeforeAllocation(t *testing.T) {
 	}
 	if err := j.Replay(func([]byte) error { t.Fatal("unexpected replay callback"); return nil }); err == nil {
 		t.Fatal("oversized record accepted")
+	}
+}
+
+func TestAppendRejectsOversizedRecord(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "journal"), 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	if err := j.Append(make([]byte, maxJournalRecordBytes+1)); !errors.Is(err, ErrRecordTooLarge) {
+		t.Fatalf("append error = %v, want ErrRecordTooLarge", err)
 	}
 }
 

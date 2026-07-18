@@ -15,6 +15,7 @@ import (
 
 var ErrFull = errors.New("journal byte limit exceeded")
 var ErrEnvelopeTooLarge = errors.New("journal envelope field too large")
+var ErrRecordTooLarge = errors.New("journal record too large")
 
 const maxJournalRecordBytes = 64 << 20
 
@@ -101,6 +102,9 @@ func Open(path string, maxBytes int64) (*Journal, error) {
 func (j *Journal) Append(payload []byte) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if len(payload) > maxJournalRecordBytes {
+		return ErrRecordTooLarge
+	}
 	if int64(len(payload)) > j.maxBytes-8 {
 		return ErrFull
 	}
@@ -142,7 +146,7 @@ func (j *Journal) Replay(fn func([]byte) error) error {
 		}
 		n := binary.BigEndian.Uint32(hdr[:4])
 		if n > uint32(j.maxBytes) || n > maxJournalRecordBytes {
-			return fmt.Errorf("journal record too large")
+			return ErrRecordTooLarge
 		}
 		payload := make([]byte, n)
 		if _, err := io.ReadFull(r, payload); err != nil {

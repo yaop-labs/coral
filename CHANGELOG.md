@@ -19,6 +19,8 @@ tested, documented increment.
   of allowing one-byte length truncation and replay corruption.
 - Journal replay rejects oversized individual records before allocation and
   includes fuzz coverage for untrusted envelope bytes.
+- Journal append enforces the same per-record bound, preventing records that
+  would be accepted but unreplayable after restart.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and
