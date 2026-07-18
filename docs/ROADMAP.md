@@ -103,7 +103,7 @@ Gyre v0.5.0's required 1.26.5. Reef v0.1.0 and all OTLP contracts are unchanged.
 
 ## Increment 2.1 — Reef v0.3 production security edges
 
-Status: completed.
+Status: completed (implementation commit `17b007b`; pending merge).
 
 Adopt Reef v0.3.0 before tenant identity: fail-closed external plaintext,
 explicit bearer-over-plaintext risk acceptance, managed last-known-good
@@ -112,43 +112,95 @@ origin-bound exporters, bounded credential metrics, and lifecycle cleanup.
 This is a self-contained compatibility increment and does not make Reef
 principals into tenants. See ADR 0003 and the Reef migration guide.
 
-## Increment 3 — bounded lifecycle and truthful pipeline telemetry
+## Increment 3a — deadline-bounded drain and truthful delivery telemetry
 
-**Goal.** Make startup, backpressure, draining, and capacity observable and
-deadline-bounded before adding durability.
+Status: completed.
 
-**Boundaries.** Separate run and drain contexts; make shutdown deadlines
-effective; report processor/export errors; expose per-signal input queue and
-per-destination lane depth/capacity; rename or redefine processed-versus-delivered
-counters; validate numeric config bounds. Add byte accounting/admission for
-queues and tail sampling without changing OTLP payloads.
+**Goal.** Make processing and draining observable and deadline-bounded before
+adding durability or byte admission.
 
-**Public contracts.** Additive metrics. Any metric rename retains the old metric
-for one compatibility increment with a deprecation note. Zero config values
-keep defaults; invalid negative/extreme values fail startup.
+**Boundaries.** Separate receiver/run and processing/drain contexts; make the
+public pipeline shutdown deadline effective; cancel blocked processors and
+exporters on forced drain; report processor, exporter, and exporter-lane loss;
+and distinguish processed, dispatched, and successfully returned delivery
+counters. Cleanup continues in the background after a deadline.
+
+**Public contracts.** Additive `coral_pipeline_*` metrics with the static
+`signal` label. Existing `coral_spans_out`, `coral_metric_points_out`, and
+`coral_log_records_out` remain for compatibility for at least the next
+capability increment, but are explicitly defined as processed—not delivered.
+`Shutdown(ctx)` remains idempotent and may now return a data-loss summary or
+the caller deadline.
 
 **Storage/migrations.** None.
 
-**Security model.** Capacity labels use static signal/destination identifiers,
-never payload attributes or raw endpoints.
+**Security model.** Metrics use only the static traces/metrics/logs signal
+values. Errors and metrics do not include payload attributes, credentials, or
+raw destination endpoints.
 
-**Failure semantics.** Shutdown stops admission, drains with the shutdown
-context, and returns an error on deadline or data drop. Byte-budget exhaustion
-returns retryable OTLP `Unavailable`/`503`; permanently oversized individual
-items use partial success where the protocol permits.
+**Failure semantics.** Shutdown stops admission and drains with the shutdown
+context. Run-context cancellation no longer pre-cancels delivery. A forced
+deadline cancels in-flight work and means delivery is indeterminate; it does
+not claim rollback.
 
-**Observability.** Queue bytes/items, lane depth, dispatch/delivery/drop counts,
-drain duration/outcome, sampler bytes/traces/evictions/late items.
+**Observability.** Processed, dispatched, delivered, processor failure, exporter
+failure, exporter queue-drop, drain duration, forced state, and bounded drain
+outcome by signal.
 
 **Test strategy.** Race tests for enqueue/shutdown, deterministic blocked
-exporter failure injection, timeout tests, and byte-budget boundary tests.
+exporter failure injection, run-cancellation drain tests, timeout tests,
+idempotency, and application metrics integration.
 
-**Done when.** No shutdown path waits indefinitely, counters match actual
-states, all queues/samplers have byte and count bounds, and overload behavior is
-consistent over gRPC/HTTP.
+**Done when.** A cancelled run context still permits graceful delivery, the
+public shutdown call returns within its deadline when an exporter blocks,
+repeated shutdown returns the same terminal result, and counters distinguish
+processing from confirmed exporter success.
 
-**Compatibility.** Existing valid configs remain valid. Newly rejected values
-were previously unsafe/ambiguous and receive a migration note.
+**Compatibility.** No config, OTLP, Gyre, Reef, Wisp, or storage contract
+changes. Callers that ignored shutdown errors continue to compile; operators
+should treat newly reported failures as actionable. See ADR 0004 and the
+pipeline drain migration guide.
+
+## Increment 3b — bounded admission and per-destination capacity
+
+**Goal.** Bound all in-memory telemetry retention in bytes as well as item
+counts and make each fan-out destination diagnosable.
+
+**Boundaries.** Add byte accounting/admission for input queues, exporter lanes,
+batch processors, and tail sampling; expose per-destination lane
+depth/capacity; validate numeric config bounds; and classify overload
+consistently without changing OTLP payloads.
+
+**Public contracts.** Additive capacity configuration and metrics. Zero values
+retain documented defaults; negative and extreme values fail startup. Static
+destination identifiers are configuration identities, never raw endpoints.
+
+**Storage/migrations.** None.
+
+**Security model.** Capacity labels use only static signal/destination
+identifiers. Tenant quotas remain out of scope until authenticated
+organisation/project identity exists.
+
+**Failure semantics.** Byte-budget exhaustion is retryable OTLP
+`Unavailable`/`503`. A permanently oversized individual item uses partial
+success where the protocol permits; rejected elements are never counted as
+accepted. Tail-sampler eviction and late-item behavior remain explicit.
+
+**Observability.** Queue/lane bytes and items, capacity, admission rejection,
+sampler bytes/traces/evictions/late items, and per-destination dispatch,
+delivery, failure, and drop counts.
+
+**Test strategy.** Byte-budget boundary tests for all signals, fan-out reference
+accounting, deterministic overload tests over gRPC/HTTP, tail-sampler pressure
+tests, config-bound tests, and race tests.
+
+**Done when.** Every queue/sampler has count and byte bounds, overload behavior
+is consistent over gRPC/HTTP, and a slow destination can be identified without
+unbounded metric cardinality.
+
+**Compatibility.** Existing safe configs remain valid. Newly rejected values
+were previously unsafe or ambiguous and receive a migration note. No
+Gyre/Reef/Wisp wire changes.
 
 ## Increment 4 — lossless standard OTLP trace path
 
