@@ -219,6 +219,14 @@ func firstMetadata(md metadata.MD, key string) string {
 	return v[0]
 }
 
+func validateWispHTTP(w http.ResponseWriter, req *http.Request) bool {
+	if _, err := parseWispHeaders(req.Header.Get("x-wisp-envelope-id"), req.Header.Get("x-wisp-signal-kind")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // Start binds the listeners and begins serving, returning once both are bound
 // (or a bind fails). It does not block; call Stop to shut down. Start must run
 // after the target pipelines are started, since it feeds them via Sink.
@@ -597,6 +605,10 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 
 func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 	s.requests.Add(1)
+	if !validateWispHTTP(w, req) {
+		s.errs.Add(1)
+		return
+	}
 	body, enc, ok := otlphttp.ReadBody(w, req, int64(s.maxRecv))
 	if !ok {
 		s.errs.Add(1)
@@ -626,6 +638,10 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 
 func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 	s.requests.Add(1)
+	if !validateWispHTTP(w, req) {
+		s.errs.Add(1)
+		return
+	}
 	body, enc, ok := otlphttp.ReadBody(w, req, int64(s.maxRecv))
 	if !ok {
 		s.errs.Add(1)
@@ -654,6 +670,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 
 func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 	s.requests.Add(1)
+	if !validateWispHTTP(w, req) {
+		s.errs.Add(1)
+		return
+	}
 	body, enc, ok := otlphttp.ReadBody(w, req, int64(s.maxRecv))
 	if !ok {
 		s.errs.Add(1)
