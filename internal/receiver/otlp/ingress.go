@@ -659,6 +659,9 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 	}
 	b := model.Batch{Spans: spans}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
+		if tenant, ok := TenantFromContext(ctx); ok {
+			s.recordTenant(tenant, false, false, true)
+		}
 		return 0, "", errors.New("tenant quota exceeded")
 	}
 	if s.sink.TraceAdmit != nil {
@@ -669,6 +672,9 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 			return 0, "", err
 		}
 		s.tracesAccepted.Add(uint64(b.Len()))
+		if tenant, ok := TenantFromContext(ctx); ok {
+			s.recordTenant(tenant, true, rejected > 0, false)
+		}
 	}
 	if rejected > 0 {
 		s.tracesRejected.Add(uint64(rejected))
