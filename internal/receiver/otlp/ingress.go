@@ -26,6 +26,7 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 
+	"github.com/yaop-labs/coral/internal/journal"
 	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
@@ -114,6 +115,7 @@ type Server struct {
 	tenantMap    map[string]string
 	tenantLimits map[string]TenantLimit
 	dedup        *dedupWindow
+	journal      *journal.Journal
 	grpcSecurity edge.ServerConfig
 	httpSecurity edge.ServerConfig
 
@@ -151,10 +153,12 @@ func NewServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink) *Server {
 }
 
 type SecurityConfig struct {
-	GRPC         edge.ServerConfig
-	HTTP         edge.ServerConfig
-	TenantMap    map[string]string
-	TenantLimits map[string]TenantLimit
+	GRPC            edge.ServerConfig
+	HTTP            edge.ServerConfig
+	TenantMap       map[string]string
+	TenantLimits    map[string]TenantLimit
+	JournalPath     string
+	JournalMaxBytes int64
 }
 
 type TenantLimit struct {
@@ -188,6 +192,14 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		}
 		logEdgeWarnings("http", warnings)
 	}
+	var admissionJournal *journal.Journal
+	var journalErr error
+	if security.JournalPath != "" {
+		admissionJournal, journalErr = journal.Open(security.JournalPath, security.JournalMaxBytes)
+		if journalErr != nil {
+			return nil, fmt.Errorf("journal: %w", journalErr)
+		}
+	}
 	return &Server{
 		grpcAddr:     grpcAddr,
 		httpAddr:     httpAddr,
@@ -195,6 +207,7 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		sink:         sink,
 		tenantMap:    security.TenantMap,
 		tenantLimits: security.TenantLimits,
+		journal:      admissionJournal,
 		dedup:        newDedupWindow(100000, 15*time.Minute),
 		grpcSecurity: security.GRPC,
 		httpSecurity: security.HTTP,
@@ -296,6 +309,13 @@ func (s *Server) rememberHTTP(req *http.Request, signal, key string, body []byte
 	}
 	principal, _ := bearer.PrincipalFromContext(req.Context())
 	s.dedup.remember(principal, signal, key, body)
+}
+
+func (s *Server) appendAdmission(payload []byte) error {
+	if s.journal == nil {
+		return nil
+	}
+	return s.journal.Append(payload)
 }
 
 // Start binds the listeners and begins serving, returning once both are bound
@@ -465,6 +485,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.grpcEdge != nil {
 		errs = append(errs, s.grpcEdge.Close())
 	}
+	if s.journal != nil {
+		errs = append(errs, s.journal.Close())
+	}
 	return errors.Join(errs...)
 }
 
@@ -626,6 +649,9 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
+	if err := g.s.appendAdmission(mustMarshal(req)); err != nil {
+		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
+	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
@@ -656,6 +682,9 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
+	if err := g.s.appendAdmission(mustMarshal(req)); err != nil {
+		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
+	}
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
@@ -684,6 +713,9 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 		return &collogspb.ExportLogsServiceResponse{}, nil
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
+	if err := g.s.appendAdmission(mustMarshal(req)); err != nil {
+		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {

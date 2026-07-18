@@ -30,6 +30,8 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 
 // Config is the collector configuration.
 type Config struct {
+	JournalPath     string `yaml:"journal_path"`
+	JournalMaxBytes int64  `yaml:"journal_max_bytes"`
 	// TenantMap binds authenticated Reef principals to stable tenant IDs.
 	TenantMap    map[string]string      `yaml:"tenant_map"`
 	TenantLimits map[string]TenantLimit `yaml:"tenant_limits"`
