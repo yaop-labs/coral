@@ -58,7 +58,7 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if code := selfObsGet(t, h, "/readyz"); code != http.StatusServiceUnavailable {
 		t.Errorf("/readyz before ready = %d, want 503", code)
 	}
-	a.ready.Store(true)
+	a.readiness.Store(uint32(readinessReady))
 	if code := selfObsGet(t, h, "/readyz"); code != http.StatusOK {
 		t.Errorf("/readyz after ready = %d, want 200", code)
 	}
@@ -75,8 +75,26 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if !strings.Contains(body, "coral_otlp_rejected_spans") {
 		t.Errorf("/metrics missing ingress counters:\n%s", body)
 	}
+	for _, metric := range []string{
+		"coral_build_info{",
+		"coral_ready 1",
+		`coral_readiness_state{state="ready"} 1`,
+		`coral_pipeline_queue_depth{signal="traces"}`,
+		`coral_pipeline_queue_capacity{signal="traces"} 64`,
+	} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("/metrics missing %q:\n%s", metric, body)
+		}
+	}
 	if strings.Contains(body, "collector_") {
 		t.Errorf("/metrics still uses the legacy collector_ prefix:\n%s", body)
+	}
+}
+
+func TestPrometheusLabelValue(t *testing.T) {
+	got := prometheusLabelValue("a\\b\"\n")
+	if got != `a\\b\"\n` {
+		t.Fatalf("prometheusLabelValue() = %q", got)
 	}
 }
 

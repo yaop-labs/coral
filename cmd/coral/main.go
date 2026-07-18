@@ -3,8 +3,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,21 +14,45 @@ import (
 	"time"
 
 	"github.com/yaop-labs/coral/internal/app"
+	"github.com/yaop-labs/coral/internal/buildinfo"
 	"github.com/yaop-labs/coral/internal/config"
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "coral:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	configPath := flag.String("config", "", "path to YAML config (required)")
-	flag.Parse()
+func run(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("coral", flag.ContinueOnError)
+	flags.SetOutput(stdout)
+	configPath := flags.String("config", "", "path to YAML config (required)")
+	showVersion := flags.Bool("version", false, "print version and exit")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments: %v", flags.Args())
+	}
+
+	build := buildinfo.Current()
+	if *showVersion {
+		_, err := fmt.Fprintln(stdout, build.String())
+		return err
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger.Info("coral build",
+		"version", build.Version,
+		"revision", build.Revision,
+		"modified", build.Modified,
+		"go_version", build.GoVersion,
+	)
 
 	if *configPath == "" {
 		return fmt.Errorf("--config is required; refusing to start an unconfigured coral")

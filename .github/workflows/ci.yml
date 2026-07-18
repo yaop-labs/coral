@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Formatting
+        run: make fmt-check
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+      - name: Race tests
+        run: make test-race
+
+      - name: Config parser fuzz smoke
+        run: make fuzz
+
+      - name: Reproducible package
+        env:
+          VERSION: ci
+          REVISION: ${{ github.sha }}
+        run: |
+          chmod +x scripts/package.sh
+          scripts/package.sh linux amd64 "${VERSION}" "${REVISION}" dist-a
+          scripts/package.sh linux amd64 "${VERSION}" "${REVISION}" dist-b
+          cmp \
+            "dist-a/coral_${VERSION}_linux_amd64.tar.gz" \
+            "dist-b/coral_${VERSION}_linux_amd64.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coral-linux-amd64-${{ github.sha }}
+          path: dist-a/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

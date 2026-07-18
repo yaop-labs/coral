@@ -256,6 +256,12 @@ func (p *Pipeline[T]) Stats() (batchesIn, batchesDropped, itemsOut uint64) {
 	return p.batchesIn.Load(), p.batchesDropped.Load(), p.itemsOut.Load()
 }
 
+// QueueDepth returns the current input queue depth and its configured capacity.
+// Channel len/cap are safe concurrent snapshots and do not block producers.
+func (p *Pipeline[T]) QueueDepth() (depth, capacity int) {
+	return len(p.in), cap(p.in)
+}
+
 // ExporterDrops returns batches dropped from an individual exporter lane
 // because that destination remained slower than the pipeline.
 func (p *Pipeline[T]) ExporterDrops() uint64 { return p.exporterDrops.Load() }
