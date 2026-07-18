@@ -138,6 +138,31 @@ func TestJournalCompactFsyncFailure(t *testing.T) {
 	_ = j.Close()
 }
 
+func TestJournalCapacityBoundUnderRepeatedAppend(t *testing.T) {
+	const capBytes int64 = 4096
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), capBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	for i := 0; i < 10000; i++ {
+		err = j.Append([]byte("record"))
+		if err == ErrFull {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	bytes, max := j.Stats()
+	if bytes > max || max != capBytes {
+		t.Fatalf("bytes=%d max=%d", bytes, max)
+	}
+	if err != ErrFull {
+		t.Fatal("capacity was not enforced")
+	}
+}
+
 func TestJournalRejectsCorruptionAndFull(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "j.log")
 	j, err := Open(p, 16)
