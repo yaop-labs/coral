@@ -37,6 +37,8 @@ tested, documented increment.
   deduplication with hit/conflict counters.
 - Bounded CRC-protected fsync admission journal with replay and pressure
   snapshots.
+- Routed journal envelopes with startup replay, post-replay compaction, age
+  TTL compaction, and process-crash recovery coverage.
 
 ### Changed
 
