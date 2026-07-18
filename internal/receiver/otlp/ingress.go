@@ -73,6 +73,21 @@ func tenantContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, tenantContextKey{}, principal)
 }
 
+func tenantContextWithPolicy(ctx context.Context, policy map[string]string) (context.Context, bool) {
+	if len(policy) == 0 {
+		return tenantContext(ctx), true
+	}
+	principal, ok := bearer.PrincipalFromContext(ctx)
+	if !ok || principal == "" {
+		return ctx, false
+	}
+	tenant, ok := policy[principal]
+	if !ok || tenant == "" {
+		return ctx, false
+	}
+	return context.WithValue(ctx, tenantContextKey{}, tenant), true
+}
+
 // Server is the unified OTLP ingress: one gRPC server and one HTTP mux serving
 // traces, metrics, and logs on the platform's standard 4317/4318 ports
 // (contract §2). It replaces the former per-signal receivers so a stock OTel
@@ -82,6 +97,7 @@ type Server struct {
 	httpAddr     string
 	maxRecv      int
 	sink         Sink
+	tenantMap    map[string]string
 	grpcSecurity edge.ServerConfig
 	httpSecurity edge.ServerConfig
 
@@ -117,8 +133,9 @@ func NewServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink) *Server {
 }
 
 type SecurityConfig struct {
-	GRPC edge.ServerConfig
-	HTTP edge.ServerConfig
+	GRPC      edge.ServerConfig
+	HTTP      edge.ServerConfig
+	TenantMap map[string]string
 }
 
 // NewSecureServer builds an ingress with optional TLS/mTLS and bearer-token
@@ -152,6 +169,7 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		httpAddr:     httpAddr,
 		maxRecv:      maxRecvBytes,
 		sink:         sink,
+		tenantMap:    security.TenantMap,
 		grpcSecurity: security.GRPC,
 		httpSecurity: security.HTTP,
 		ready:        make(chan struct{}),
@@ -398,7 +416,11 @@ func (s *Server) Rejected() (traces, points, logs uint64) {
 // admitTraces applies the trace admit hook (if any), enqueues the admitted
 // spans, and reports how many were rejected as invalid (partial_success).
 func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected int, reason string, err error) {
-	ctx = tenantContext(ctx)
+	var ok bool
+	ctx, ok = tenantContextWithPolicy(ctx, s.tenantMap)
+	if !ok {
+		return 0, "", errors.New("tenant principal is not authorized")
+	}
 	b := model.Batch{Spans: spans}
 	if s.sink.TraceAdmit != nil {
 		b, rejected, reason = s.sink.TraceAdmit(b)
@@ -416,7 +438,11 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 }
 
 func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetrics) (rejected int, reason string, err error) {
-	ctx = tenantContext(ctx)
+	var ok bool
+	ctx, ok = tenantContextWithPolicy(ctx, s.tenantMap)
+	if !ok {
+		return 0, "", errors.New("tenant principal is not authorized")
+	}
 	b := metric.Batch{ResourceMetrics: rm}
 	if s.sink.MetricAdmit != nil {
 		b, rejected, reason = s.sink.MetricAdmit(b)
@@ -434,7 +460,11 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 }
 
 func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (rejected int, reason string, err error) {
-	ctx = tenantContext(ctx)
+	var ok bool
+	ctx, ok = tenantContextWithPolicy(ctx, s.tenantMap)
+	if !ok {
+		return 0, "", errors.New("tenant principal is not authorized")
+	}
 	b := logs.Batch{ResourceLogs: rl}
 	if s.sink.LogAdmit != nil {
 		b, rejected, reason = s.sink.LogAdmit(b)
