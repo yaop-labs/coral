@@ -23,6 +23,8 @@ tested, documented increment.
   would be accepted but unreplayable after restart.
 - Fixed dedup window lock ownership so Wisp envelope check/lookup cannot
   self-deadlock; tenant/signal scoping remains covered by race-tested tests.
+- Added deterministic TTL-expiry and bounded-eviction coverage for the dedup
+  window.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and

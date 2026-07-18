@@ -20,3 +20,28 @@ func TestDedupWindowTenantSignalAndConflict(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+func TestDedupWindowTTLAndBoundedEviction(t *testing.T) {
+	now := time.Unix(100, 0)
+	d := newDedupWindow(2, time.Second)
+	d.now = func() time.Time { return now }
+	if d.check("t", "logs", "one", []byte("1")) != dedupNew {
+		t.Fatal("first id not new")
+	}
+	if d.check("t", "logs", "two", []byte("2")) != dedupNew {
+		t.Fatal("second id not new")
+	}
+	if d.check("t", "logs", "three", []byte("3")) != dedupNew {
+		t.Fatal("third id not new")
+	}
+	if len(d.items) != 2 {
+		t.Fatalf("window size = %d, want 2", len(d.items))
+	}
+	now = now.Add(2 * time.Second)
+	if d.lookup("t", "logs", "two", []byte("2")) != dedupNew {
+		t.Fatal("expired id remained a hit")
+	}
+	if len(d.items) != 0 {
+		t.Fatalf("expired entries = %d, want 0", len(d.items))
+	}
+}
