@@ -758,6 +758,10 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &coltracepb.ExportTraceServiceResponse{})
 		return
 	}
+	if err := s.appendAdmission(body); err != nil {
+		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var pb coltracepb.ExportTraceServiceRequest
 	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
 		s.errs.Add(1)
@@ -805,6 +809,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &colmetricspb.ExportMetricsServiceResponse{})
 		return
 	}
+	if err := s.appendAdmission(body); err != nil {
+		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var pb colmetricspb.ExportMetricsServiceRequest
 	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
 		s.errs.Add(1)
@@ -849,6 +857,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 	}
 	if dedup == dedupHit {
 		writeResponse(w, enc, &collogspb.ExportLogsServiceResponse{})
+		return
+	}
+	if err := s.appendAdmission(body); err != nil {
+		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	var pb collogspb.ExportLogsServiceRequest
