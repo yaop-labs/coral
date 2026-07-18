@@ -2,6 +2,8 @@ package fathom
 
 import (
 	"context"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -54,5 +56,18 @@ func testSpan() model.Span {
 		Resource: model.Resource{Attrs: []model.Attribute{
 			model.StringAttr("service.name", "checkout"),
 		}},
+	}
+}
+
+func TestToTraceRequestPreservesRawEventsAndLinks(t *testing.T) {
+	sp := &tracepb.Span{Name: "raw", Events: []*tracepb.Span_Event{{Name: "exception"}}, Links: []*tracepb.Span_Link{{TraceId: []byte{1}}}}
+	raw, err := proto.Marshal(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := toTraceRequest(model.Batch{Spans: []model.Span{{Name: "raw", OTLP: raw}}})
+	out := req.GetResourceSpans()[0].GetScopeSpans()[0].GetSpans()[0]
+	if len(out.GetEvents()) != 1 || len(out.GetLinks()) != 1 {
+		t.Fatalf("events/links lost: %d/%d", len(out.GetEvents()), len(out.GetLinks()))
 	}
 }
