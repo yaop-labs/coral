@@ -19,6 +19,8 @@ func TestPipelineBounds(t *testing.T) {
 		{"excess workers", "pipeline:\n  workers: 1025\n"},
 		{"negative queue", "pipeline:\n  queue_size: -1\n"},
 		{"excess queue", "pipeline:\n  queue_size: 1000001\n"},
+		{"negative queue bytes", "pipeline:\n  queue_bytes: -1\n"},
+		{"excess queue bytes", "pipeline:\n  queue_bytes: 1099511627777\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Parse([]byte(tc.yaml)); err == nil {

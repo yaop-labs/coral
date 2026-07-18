@@ -94,8 +94,9 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 	}
 
 	p := pipeline.New[model.Batch](pipeline.Config{
-		Workers:   cfg.Pipeline.Workers,
-		QueueSize: cfg.Pipeline.QueueSize,
+		Workers:    cfg.Pipeline.Workers,
+		QueueSize:  cfg.Pipeline.QueueSize,
+		QueueBytes: cfg.Pipeline.QueueBytes,
 	}, logger)
 
 	now := time.Now().UTC()

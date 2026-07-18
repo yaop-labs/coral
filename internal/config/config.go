@@ -46,13 +46,15 @@ type Config struct {
 
 // PipelineConfig configures pipeline concurrency.
 type PipelineConfig struct {
-	Workers   int `yaml:"workers"`
-	QueueSize int `yaml:"queue_size"`
+	Workers    int   `yaml:"workers"`
+	QueueSize  int   `yaml:"queue_size"`
+	QueueBytes int64 `yaml:"queue_bytes"`
 }
 
 const (
-	maxPipelineWorkers   = 1024
-	maxPipelineQueueSize = 1_000_000
+	maxPipelineWorkers    = 1024
+	maxPipelineQueueSize  = 1_000_000
+	maxPipelineQueueBytes = 1 << 40
 )
 
 func (c PipelineConfig) validate() error {
@@ -61,6 +63,9 @@ func (c PipelineConfig) validate() error {
 	}
 	if c.QueueSize < 0 || c.QueueSize > maxPipelineQueueSize {
 		return fmt.Errorf("pipeline.queue_size must be between 0 and %d", maxPipelineQueueSize)
+	}
+	if c.QueueBytes < 0 || c.QueueBytes > maxPipelineQueueBytes {
+		return fmt.Errorf("pipeline.queue_bytes must be between 0 and %d", maxPipelineQueueBytes)
 	}
 	return nil
 }
