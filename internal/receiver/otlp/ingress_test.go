@@ -510,6 +510,24 @@ func TestTenantQuotaExceeded(t *testing.T) {
 	}
 }
 
+func TestTenantConcurrentAdmission(t *testing.T) {
+	s := &Server{tenantLimits: map[string]TenantLimit{"tenant-a": {MaxConcurrent: 1}}, tenantStats: map[string]TenantCounters{"tenant-a": {}}}
+	ctx := context.WithValue(context.Background(), tenantContextKey{}, "tenant-a")
+	release, ok := s.acquireTenant(ctx)
+	if !ok {
+		t.Fatal("first acquire denied")
+	}
+	if _, ok = s.acquireTenant(ctx); ok {
+		t.Fatal("second acquire allowed")
+	}
+	release()
+	if release2, ok := s.acquireTenant(ctx); !ok {
+		t.Fatal("acquire after release denied")
+	} else {
+		release2()
+	}
+}
+
 func postTraceWithToken(t *testing.T, address, token string) int {
 	t.Helper()
 	body, err := proto.Marshal(traceReq())

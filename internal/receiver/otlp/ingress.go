@@ -211,6 +211,12 @@ func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
 	}
 	s.tenantStatsMu.Lock()
 	defer s.tenantStatsMu.Unlock()
+	if s.tenantInFlight == nil {
+		s.tenantInFlight = make(map[string]int)
+	}
+	if s.tenantStats == nil {
+		s.tenantStats = make(map[string]TenantCounters)
+	}
 	if s.tenantInFlight[tenant] >= limit {
 		s.tenantStats[tenant] = TenantCounters{QuotaRejected: s.tenantStats[tenant].QuotaRejected + 1}
 		return func() {}, false
