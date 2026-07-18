@@ -690,6 +690,9 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 	}
 	b := metric.Batch{ResourceMetrics: rm}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
+		if tenant, ok := TenantFromContext(ctx); ok {
+			s.recordTenant(tenant, false, false, true)
+		}
 		return 0, "", errors.New("tenant quota exceeded")
 	}
 	if s.sink.MetricAdmit != nil {
@@ -700,6 +703,9 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 			return 0, "", err
 		}
 		s.pointsAccepted.Add(uint64(b.Len()))
+		if tenant, ok := TenantFromContext(ctx); ok {
+			s.recordTenant(tenant, true, rejected > 0, false)
+		}
 	}
 	if rejected > 0 {
 		s.pointsRejected.Add(uint64(rejected))
@@ -715,6 +721,9 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 	}
 	b := logs.Batch{ResourceLogs: rl}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
+		if tenant, ok := TenantFromContext(ctx); ok {
+			s.recordTenant(tenant, false, false, true)
+		}
 		return 0, "", errors.New("tenant quota exceeded")
 	}
 	if s.sink.LogAdmit != nil {
@@ -725,6 +734,9 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 			return 0, "", err
 		}
 		s.logsAccepted.Add(uint64(b.Len()))
+		if tenant, ok := TenantFromContext(ctx); ok {
+			s.recordTenant(tenant, true, rejected > 0, false)
+		}
 	}
 	if rejected > 0 {
 		s.logsRejected.Add(uint64(rejected))
