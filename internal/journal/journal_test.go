@@ -65,3 +65,33 @@ func TestJournalRejectsCorruptionAndFull(t *testing.T) {
 		t.Fatal("corruption accepted")
 	}
 }
+
+func TestJournalRecoverTruncatedTail(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "j.log")
+	j, err := Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = j.Append([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	_ = j.Close()
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 1})
+	_ = f.Close()
+	j, err = Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var n int
+	if err = j.Recover(func([]byte) error { n++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("replayed=%d", n)
+	}
+}

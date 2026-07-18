@@ -97,6 +97,43 @@ func (j *Journal) Replay(fn func([]byte) error) error {
 	return nil
 }
 
+// Recover replays valid records and truncates an incomplete/corrupt tail from
+// an interrupted append. Checksum failures in a complete record remain errors.
+func (j *Journal) Recover(fn func([]byte) error) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if _, err := j.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReader(j.f)
+	var offset int64
+	for {
+		var hdr [8]byte
+		if _, err := io.ReadFull(r, hdr[:]); err == io.EOF {
+			j.size = offset
+			return nil
+		} else if err != nil {
+			_ = j.f.Truncate(offset)
+			j.size = offset
+			return nil
+		}
+		n := binary.BigEndian.Uint32(hdr[:4])
+		payload := make([]byte, n)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			_ = j.f.Truncate(offset)
+			j.size = offset
+			return nil
+		}
+		if crc32.ChecksumIEEE(payload) != binary.BigEndian.Uint32(hdr[4:]) {
+			return fmt.Errorf("journal checksum mismatch")
+		}
+		if err := fn(payload); err != nil {
+			return err
+		}
+		offset += int64(8 + n)
+	}
+}
+
 func (j *Journal) Close() error { j.mu.Lock(); defer j.mu.Unlock(); return j.f.Close() }
 
 func (j *Journal) Stats() (bytes, maxBytes int64) {
