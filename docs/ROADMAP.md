@@ -207,6 +207,10 @@ Gyre/Reef/Wisp wire changes.
 
 ## Increment 4 — lossless standard OTLP trace path
 
+The trace fidelity slice now preserves raw OTLP events, links, scope/schema,
+flags, and dropped-field counts through the Fathom exporter. Full trace
+assembly and sampling semantics remain in progress.
+
 **Goal.** Preserve all standard OTLP trace fields before Wisp enables durable
 traces.
 
