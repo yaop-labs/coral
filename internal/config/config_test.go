@@ -30,6 +30,15 @@ func TestPipelineBounds(t *testing.T) {
 	}
 }
 
+func TestJournalBounds(t *testing.T) {
+	if _, err := Parse([]byte("journal_max_bytes: -1\n")); err == nil {
+		t.Fatal("accepted negative journal budget")
+	}
+	if _, err := Parse([]byte("journal_max_bytes: 1099511627777\n")); err == nil {
+		t.Fatal("accepted excessive journal budget")
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		Receivers: ReceiversConfig{

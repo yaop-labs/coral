@@ -294,6 +294,9 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	if c.JournalMaxBytes < 0 || c.JournalMaxBytes > (1<<40) {
+		return fmt.Errorf("journal_max_bytes must be between 0 and %d", 1<<40)
+	}
 	if err := c.Pipeline.validate(); err != nil {
 		return err
 	}
