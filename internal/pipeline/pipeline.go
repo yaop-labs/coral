@@ -183,6 +183,28 @@ func (p *Pipeline[T]) Shutdown(ctx context.Context) error {
 	return err
 }
 
+// CloseUnstarted releases processors and exporters materialized while building
+// an application that subsequently failed validation. It must only be called
+// by the single construction goroutine before Start.
+func (p *Pipeline[T]) CloseUnstarted() error {
+	if p.started.Load() {
+		return errors.New("pipeline is already started")
+	}
+	var errs []error
+	for i := len(p.processors) - 1; i >= 0; i-- {
+		if err := p.processors[i].Close(); err != nil {
+			errs = append(errs, fmt.Errorf("processor %d: %w", i, err))
+		}
+	}
+	for i := len(p.exporters) - 1; i >= 0; i-- {
+		if err := p.exporters[i].Close(); err != nil {
+			errs = append(errs, fmt.Errorf("exporter %d: %w", i, err))
+		}
+	}
+	p.stopped.Store(true)
+	return errors.Join(errs...)
+}
+
 // Export sends b through the full processor chain and then to exporters.
 func (p *Pipeline[T]) Export(ctx context.Context, b T) error {
 	return p.processFrom(ctx, b, 0)

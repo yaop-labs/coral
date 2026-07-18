@@ -3,7 +3,9 @@ package otlp
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -26,9 +28,9 @@ import (
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/coral/internal/otlphttp"
-	"github.com/yaop-labs/reef/bearer"
+	"github.com/yaop-labs/reef/credential"
+	"github.com/yaop-labs/reef/edge"
 	"github.com/yaop-labs/reef/grpcreef"
-	"github.com/yaop-labs/reef/tlsconf"
 )
 
 const defaultMaxRecvBytes = 16 << 20
@@ -58,13 +60,12 @@ type Sink struct {
 // (contract §2). It replaces the former per-signal receivers so a stock OTel
 // SDK — which sends every signal to a single endpoint — just works.
 type Server struct {
-	grpcAddr string
-	httpAddr string
-	maxRecv  int
-	sink     Sink
-	grpcOpts []grpc.ServerOption
-	httpTLS  *tls.Config
-	httpAuth func(http.Handler) http.Handler
+	grpcAddr     string
+	httpAddr     string
+	maxRecv      int
+	sink         Sink
+	grpcSecurity edge.ServerConfig
+	httpSecurity edge.ServerConfig
 
 	grpcSrv       *grpc.Server
 	httpSrv       *http.Server
@@ -74,6 +75,8 @@ type Server struct {
 	httpWG        sync.WaitGroup
 	httpHandlerMu sync.Mutex
 	httpStopping  bool
+	grpcEdge      *grpcreef.ServerEdge
+	httpEdge      *edge.HTTPServer
 
 	mu    sync.Mutex
 	ready chan struct{} // closed once listeners are bound (or bind failed)
@@ -96,10 +99,8 @@ func NewServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink) *Server {
 }
 
 type SecurityConfig struct {
-	GRPCTLS  *tlsconf.ServerConfig
-	HTTPTLS  *tlsconf.ServerConfig
-	GRPCAuth *bearer.ServerConfig
-	HTTPAuth *bearer.ServerConfig
+	GRPC edge.ServerConfig
+	HTTP edge.ServerConfig
 }
 
 // NewSecureServer builds an ingress with optional TLS/mTLS and bearer-token
@@ -112,28 +113,37 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 	if maxRecvBytes <= 0 {
 		maxRecvBytes = defaultMaxRecvBytes
 	}
-	grpcOptions, err := grpcreef.ServerOptions(security.GRPCTLS, security.GRPCAuth)
-	if err != nil {
-		return nil, fmt.Errorf("grpc: %w", err)
+	security.GRPC.Bind = grpcAddr
+	security.HTTP.Bind = httpAddr
+	if grpcAddr != "" {
+		warnings, err := edge.ValidateServer(security.GRPC)
+		if err != nil {
+			return nil, fmt.Errorf("grpc: %w", err)
+		}
+		logEdgeWarnings("grpc", warnings)
 	}
-	httpTLS, err := tlsconf.Server(security.HTTPTLS)
-	if err != nil {
-		return nil, fmt.Errorf("http: %w", err)
-	}
-	httpAuth, err := bearer.Require(security.HTTPAuth)
-	if err != nil {
-		return nil, fmt.Errorf("http auth: %w", err)
+	if httpAddr != "" {
+		warnings, err := edge.ValidateServer(security.HTTP)
+		if err != nil {
+			return nil, fmt.Errorf("http: %w", err)
+		}
+		logEdgeWarnings("http", warnings)
 	}
 	return &Server{
-		grpcAddr: grpcAddr,
-		httpAddr: httpAddr,
-		maxRecv:  maxRecvBytes,
-		sink:     sink,
-		grpcOpts: grpcOptions,
-		httpTLS:  httpTLS,
-		httpAuth: httpAuth,
-		ready:    make(chan struct{}),
+		grpcAddr:     grpcAddr,
+		httpAddr:     httpAddr,
+		maxRecv:      maxRecvBytes,
+		sink:         sink,
+		grpcSecurity: security.GRPC,
+		httpSecurity: security.HTTP,
+		ready:        make(chan struct{}),
 	}, nil
+}
+
+func logEdgeWarnings(transport string, warnings []edge.Warning) {
+	for _, warning := range warnings {
+		slog.Warn("reef ingress configuration warning", "transport", transport, "warning", string(warning))
+	}
 }
 
 // Start binds the listeners and begins serving, returning once both are bound
@@ -164,7 +174,34 @@ func (s *Server) Start() error {
 	}
 
 	if grpcLn != nil {
-		serverOpts := append([]grpc.ServerOption{grpc.MaxRecvMsgSize(s.maxRecv)}, s.grpcOpts...)
+		managed, err := grpcreef.NewServerEdge(s.grpcSecurity)
+		if err != nil {
+			_ = grpcLn.Close()
+			if httpLn != nil {
+				_ = httpLn.Close()
+			}
+			return fmt.Errorf("grpc security: %w", err)
+		}
+		s.grpcEdge = managed
+		logEdgeWarnings("grpc", managed.Warnings)
+	}
+	if httpLn != nil {
+		managed, err := edge.NewHTTPServer(s.httpSecurity)
+		if err != nil {
+			if grpcLn != nil {
+				_ = grpcLn.Close()
+			}
+			_ = httpLn.Close()
+			_ = s.grpcEdge.Close()
+			s.grpcEdge = nil
+			return fmt.Errorf("http security: %w", err)
+		}
+		s.httpEdge = managed
+		logEdgeWarnings("http", managed.Warnings)
+	}
+
+	if grpcLn != nil {
+		serverOpts := append([]grpc.ServerOption{grpc.MaxRecvMsgSize(s.maxRecv)}, s.grpcEdge.Options...)
 		srv := grpc.NewServer(serverOpts...)
 		if s.sink.Traces != nil {
 			coltracepb.RegisterTraceServiceServer(srv, &grpcTraceService{s: s})
@@ -182,8 +219,8 @@ func (s *Server) Start() error {
 	}
 
 	if httpLn != nil {
-		if s.httpTLS != nil {
-			httpLn = tls.NewListener(httpLn, s.httpTLS.Clone())
+		if s.httpEdge.TLSConfig != nil {
+			httpLn = tls.NewListener(httpLn, s.httpEdge.TLSConfig.Clone())
 		}
 		mux := http.NewServeMux()
 		if s.sink.Traces != nil {
@@ -199,7 +236,7 @@ func (s *Server) Start() error {
 			w.WriteHeader(http.StatusOK)
 		})
 		handlerCtx, cancel := context.WithCancel(context.Background())
-		secured := s.httpAuth(mux)
+		secured := s.httpEdge.Middleware(mux)
 		tracked := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			s.httpHandlerMu.Lock()
 			if s.httpStopping {
@@ -239,6 +276,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	grpcSrv, httpSrv, httpCancel := s.grpcSrv, s.httpSrv, s.httpCancel
 	s.mu.Unlock()
 
+	var errs []error
 	if grpcSrv != nil {
 		done := make(chan struct{})
 		go func() { grpcSrv.GracefulStop(); close(done) }()
@@ -261,14 +299,46 @@ func (s *Server) Stop(ctx context.Context) error {
 			}
 			_ = httpSrv.Close()
 			s.httpWG.Wait()
-			return err
+			errs = append(errs, err)
+		} else {
+			if httpCancel != nil {
+				httpCancel()
+			}
+			s.httpWG.Wait()
 		}
-		if httpCancel != nil {
-			httpCancel()
-		}
-		s.httpWG.Wait()
 	}
-	return nil
+	if s.httpEdge != nil {
+		errs = append(errs, s.httpEdge.Close())
+	}
+	if s.grpcEdge != nil {
+		errs = append(errs, s.grpcEdge.Close())
+	}
+	return errors.Join(errs...)
+}
+
+// ReloadCredentials immediately checks all file-backed credentials on both
+// transports. Background last-known-good reload remains active.
+func (s *Server) ReloadCredentials() error {
+	var errs []error
+	if s.grpcEdge != nil {
+		errs = append(errs, s.grpcEdge.ReloadCredentials())
+	}
+	if s.httpEdge != nil {
+		errs = append(errs, s.httpEdge.ReloadCredentials())
+	}
+	return errors.Join(errs...)
+}
+
+// CredentialStatus returns bounded, secret-free Reef lifecycle snapshots.
+func (s *Server) CredentialStatus() []credential.Status {
+	var statuses []credential.Status
+	if s.grpcEdge != nil {
+		statuses = append(statuses, s.grpcEdge.CredentialStatus()...)
+	}
+	if s.httpEdge != nil {
+		statuses = append(statuses, s.httpEdge.CredentialStatus()...)
+	}
+	return statuses
 }
 
 // GRPCAddr returns the bound gRPC listener address (useful with :0 in tests).

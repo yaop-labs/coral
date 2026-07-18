@@ -67,16 +67,17 @@ Decision: add a bounded durable handoff journal and acknowledge only after the
 journal admission contract is satisfied. Until then, Coral is at-most-once
 after its ingress acknowledgement boundary.
 
-### P0 — no tenant identity or isolation
+### P0 — authenticated principal is not yet tenant identity
 
-Reef v0.1.0 validates a token but its middleware/interceptors expose neither the
-matched key name nor a tenant identity. Coral's `Sink` and all signal batches
-have no organisation/project context (`internal/receiver/otlp/ingress.go:46-54`).
-There are no per-tenant quotas, queues, storage keys, or metrics.
+At the reviewed baseline, Reef v0.1.0 exposed neither the matched key name nor a
+tenant identity. The Reef v0.3 security increment now propagates the configured
+bearer key name as an authenticated principal over HTTP and gRPC. Coral's
+`Sink` and all signal batches still have no immutable organisation/project
+context, mapping policy, per-tenant quotas, queues, storage keys, or metrics.
 
-Authentication currently answers “is this one of the configured tokens?”, not
-“which tenant owns this request?”. This blocks safe deduplication, quotas,
-auditing, and multi-tenant deployment.
+Authentication can now answer “which configured credential matched?”, but not
+yet “which organisation/project owns this request?”. This still blocks safe
+tenant-aware deduplication, quotas, auditing, and multi-tenant deployment.
 
 ### P0 — OTLP traces are silently lossy
 

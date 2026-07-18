@@ -13,6 +13,7 @@ import (
 
 	"github.com/yaop-labs/coral/internal/config"
 	"github.com/yaop-labs/gyre"
+	"github.com/yaop-labs/reef/bearer"
 )
 
 func testConfig() config.Config {
@@ -97,6 +98,7 @@ func TestApp_SelfObsMux(t *testing.T) {
 		`coral_readiness_state{state="ready"} 1`,
 		`coral_pipeline_queue_depth{signal="traces"}`,
 		`coral_pipeline_queue_capacity{signal="traces"} 64`,
+		`coral_credential_events_total{kind="server_leaf",outcome="success"} 0`,
 	} {
 		if !strings.Contains(body, metric) {
 			t.Errorf("/metrics missing %q:\n%s", metric, body)
@@ -105,6 +107,90 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if strings.Contains(body, "collector_") {
 		t.Errorf("/metrics still uses the legacy collector_ prefix:\n%s", body)
 	}
+}
+
+func TestApp_ReefEdgePolicyRequiresExternalPlaintextOptIn(t *testing.T) {
+	cfg := testConfig()
+	cfg.Receivers.OTLPGRPC.Endpoint = "0.0.0.0:4317"
+	_, err := New(cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "insecure: true") {
+		t.Fatalf("external OTLP plaintext error = %v", err)
+	}
+	cfg.Receivers.OTLPGRPC.Insecure = true
+	if _, err := New(cfg, nil); err != nil {
+		t.Fatalf("explicitly insecure OTLP config: %v", err)
+	}
+
+	cfg = testConfig()
+	cfg.Metrics.Endpoint = "0.0.0.0:4888"
+	_, err = New(cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "insecure: true") {
+		t.Fatalf("external metrics plaintext error = %v", err)
+	}
+	cfg.Metrics.Insecure = true
+	if _, err := New(cfg, nil); err != nil {
+		t.Fatalf("explicitly insecure metrics config: %v", err)
+	}
+}
+
+func TestApp_SelfObservabilityReefAuthBoundary(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics = config.MetricsConfig{
+		Endpoint: "127.0.0.1:0",
+		Auth: &bearer.ServerConfig{Bearer: []bearer.Key{{
+			Name:  "operator",
+			Token: "metrics-secret",
+		}}},
+		EdgePolicyConfig: config.EdgePolicyConfig{
+			DangerAllowBearerOverPlaintext: true,
+		},
+	}
+	a, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = a.Close(ctx)
+	}()
+
+	base := "http://" + a.SelfObservabilityAddr()
+	if code := appHTTPStatus(t, base+"/healthz", ""); code != http.StatusOK {
+		t.Fatalf("unauthenticated /healthz = %d, want 200", code)
+	}
+	if code := appHTTPStatus(t, base+"/readyz", ""); code != http.StatusOK {
+		t.Fatalf("unauthenticated /readyz = %d, want 200", code)
+	}
+	if code := appHTTPStatus(t, base+"/metrics", ""); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /metrics = %d, want 401", code)
+	}
+	if code := appHTTPStatus(t, base+"/status", ""); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /status = %d, want 401", code)
+	}
+	if code := appHTTPStatus(t, base+"/metrics", "metrics-secret"); code != http.StatusOK {
+		t.Fatalf("authenticated /metrics = %d, want 200", code)
+	}
+}
+
+func appHTTPStatus(t *testing.T, url, token string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
 }
 
 func TestApp_GyreConformanceCloseBeforeStart(t *testing.T) {

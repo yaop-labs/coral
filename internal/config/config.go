@@ -67,9 +67,32 @@ type EndpointConfig struct {
 
 // OTLPEndpointConfig adds transport security to an OTLP listener.
 type OTLPEndpointConfig struct {
-	Endpoint string                `yaml:"endpoint"`
-	TLS      *tlsconf.ServerConfig `yaml:"tls"`
-	Auth     *bearer.ServerConfig  `yaml:"auth"`
+	Endpoint         string                `yaml:"endpoint"`
+	TLS              *tlsconf.ServerConfig `yaml:"tls"`
+	Auth             *bearer.ServerConfig  `yaml:"auth"`
+	EdgePolicyConfig `yaml:",inline"`
+}
+
+// EdgePolicyConfig contains Reef's explicit plaintext and credential lifecycle
+// controls. External plaintext is rejected unless Insecure is set.
+type EdgePolicyConfig struct {
+	Insecure                       bool     `yaml:"insecure"`
+	DangerAllowBearerOverPlaintext bool     `yaml:"danger_allow_bearer_over_plaintext"`
+	CredentialReloadInterval       Duration `yaml:"credential_reload_interval"`
+}
+
+func (c EdgePolicyConfig) validate(path string) error {
+	interval := c.CredentialReloadInterval.Std()
+	if interval < 0 {
+		return fmt.Errorf("%s.credential_reload_interval must not be negative", path)
+	}
+	if interval > 0 && interval < time.Second {
+		return fmt.Errorf("%s.credential_reload_interval must be at least 1s", path)
+	}
+	if interval > 24*time.Hour {
+		return fmt.Errorf("%s.credential_reload_interval must not exceed 24h", path)
+	}
+	return nil
 }
 
 // UDPConfig configures a UDP listener.
@@ -166,11 +189,12 @@ type TailSamplingConfig struct {
 
 // AmberConfig configures the Amber exporter.
 type AmberConfig struct {
-	Endpoint string                `yaml:"endpoint"`
-	Timeout  Duration              `yaml:"timeout"`
-	Retry    RetryConfig           `yaml:"retry"`
-	TLS      *tlsconf.ClientConfig `yaml:"tls"`
-	Auth     *bearer.ClientConfig  `yaml:"auth"`
+	Endpoint         string                `yaml:"endpoint"`
+	Timeout          Duration              `yaml:"timeout"`
+	Retry            RetryConfig           `yaml:"retry"`
+	TLS              *tlsconf.ClientConfig `yaml:"tls"`
+	Auth             *bearer.ClientConfig  `yaml:"auth"`
+	EdgePolicyConfig `yaml:",inline"`
 }
 
 // S3Config configures the S3 exporter.
@@ -191,7 +215,10 @@ type RetryConfig struct {
 
 // MetricsConfig configures the collector's own /metrics (self-observability) endpoint.
 type MetricsConfig struct {
-	Endpoint string `yaml:"endpoint"`
+	Endpoint         string                `yaml:"endpoint"`
+	TLS              *tlsconf.ServerConfig `yaml:"tls"`
+	Auth             *bearer.ServerConfig  `yaml:"auth"`
+	EdgePolicyConfig `yaml:",inline"`
 }
 
 // MetricPipelineConfig configures the metrics pipeline: enrich processors and
@@ -205,12 +232,13 @@ type MetricPipelineConfig struct {
 
 // MetricExporterConfig configures the amber metrics exporter.
 type MetricExporterConfig struct {
-	Type     string                `yaml:"type"`
-	Endpoint string                `yaml:"endpoint"`
-	Timeout  Duration              `yaml:"timeout"`
-	Retry    RetryConfig           `yaml:"retry"`
-	TLS      *tlsconf.ClientConfig `yaml:"tls"`
-	Auth     *bearer.ClientConfig  `yaml:"auth"`
+	Type             string                `yaml:"type"`
+	Endpoint         string                `yaml:"endpoint"`
+	Timeout          Duration              `yaml:"timeout"`
+	Retry            RetryConfig           `yaml:"retry"`
+	TLS              *tlsconf.ClientConfig `yaml:"tls"`
+	Auth             *bearer.ClientConfig  `yaml:"auth"`
+	EdgePolicyConfig `yaml:",inline"`
 }
 
 func Load(path string) (Config, error) {
@@ -239,6 +267,21 @@ func (c *Config) Validate() error {
 	anyTraceReceiver := c.Receivers.AnyEnabled()
 	metricActive := c.MetricPipeline != nil
 	logActive := c.LogPipeline != nil
+	if c.Receivers.OTLPGRPC != nil {
+		if err := c.Receivers.OTLPGRPC.validate("receivers.otlp_grpc"); err != nil {
+			return err
+		}
+	}
+	if c.Receivers.OTLPHTTP != nil {
+		if err := c.Receivers.OTLPHTTP.validate("receivers.otlp_http"); err != nil {
+			return err
+		}
+	}
+	if c.Metrics.Endpoint != "" {
+		if err := c.Metrics.validate("metrics"); err != nil {
+			return err
+		}
+	}
 
 	if !anyTraceReceiver && !metricActive && !logActive {
 		return fmt.Errorf("at least one receiver is required: enable an OTLP or legacy trace receiver, metric_pipeline, or log_pipeline")
@@ -281,6 +324,15 @@ func (c *Config) Validate() error {
 			default:
 				return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
 			}
+			if ec.Type == "amber" || ec.Type == "fathom" {
+				var edgeConfig AmberConfig
+				if err := ec.Raw.Decode(&edgeConfig); err != nil {
+					return fmt.Errorf("exporters[%d]: %w", i, err)
+				}
+				if err := edgeConfig.validate(fmt.Sprintf("exporters[%d]", i)); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -310,6 +362,9 @@ func (m *MetricPipelineConfig) validate() error {
 		case "amber", "fathom":
 		default:
 			return fmt.Errorf("metric_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
+		if err := exporter.validate(fmt.Sprintf("metric_pipeline.exporters[%d]", i)); err != nil {
+			return err
 		}
 	}
 	for i, pc := range m.Processors {
@@ -353,12 +408,13 @@ type LogPipelineConfig struct {
 
 // LogExporterConfig configures a log exporter.
 type LogExporterConfig struct {
-	Type     string                `yaml:"type"`
-	Endpoint string                `yaml:"endpoint"`
-	Timeout  Duration              `yaml:"timeout"`
-	Retry    RetryConfig           `yaml:"retry"`
-	TLS      *tlsconf.ClientConfig `yaml:"tls"`
-	Auth     *bearer.ClientConfig  `yaml:"auth"`
+	Type             string                `yaml:"type"`
+	Endpoint         string                `yaml:"endpoint"`
+	Timeout          Duration              `yaml:"timeout"`
+	Retry            RetryConfig           `yaml:"retry"`
+	TLS              *tlsconf.ClientConfig `yaml:"tls"`
+	Auth             *bearer.ClientConfig  `yaml:"auth"`
+	EdgePolicyConfig `yaml:",inline"`
 }
 
 func (l *LogPipelineConfig) validate() error {
@@ -374,6 +430,9 @@ func (l *LogPipelineConfig) validate() error {
 		case "amber", "fathom":
 		default:
 			return fmt.Errorf("log_pipeline.exporters[%d]: unknown type %q", i, exporter.Type)
+		}
+		if err := exporter.validate(fmt.Sprintf("log_pipeline.exporters[%d]", i)); err != nil {
+			return err
 		}
 	}
 	for i, pc := range l.Processors {

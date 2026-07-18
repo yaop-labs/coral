@@ -30,10 +30,12 @@ exporters.
 
 ## Security
 
-OTLP gRPC and HTTP listeners support TLS, optional client-certificate
-verification, and bearer authentication. HTTP exporters support custom CAs,
-client certificates, server-name verification, and bearer authentication.
-Prefer `token_file` over embedding a token in YAML. Example:
+Reef v0.3 protects OTLP gRPC/HTTP, self-observability, and HTTP exporter edges
+with TLS, optional client-certificate verification, bearer authentication, and
+managed last-known-good rotation. External plaintext is fail-closed unless
+`insecure: true` is explicit; bearer over plaintext additionally requires
+`danger_allow_bearer_over_plaintext: true`. Prefer `token_file` over embedding
+a token in YAML. Example:
 
 ```yaml
 receivers:
@@ -88,3 +90,5 @@ boundaries, and capability plan are in
 [`docs/ROADMAP.md`](docs/ROADMAP.md). Cross-repository Gyre/Reef/Wisp boundaries
 are explicit in
 [`docs/PLATFORM_COMPATIBILITY.md`](docs/PLATFORM_COMPATIBILITY.md).
+The Reef v0.3 fail-closed migration is documented in
+[`docs/REEF_V0.3_MIGRATION.md`](docs/REEF_V0.3_MIGRATION.md).

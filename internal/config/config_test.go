@@ -54,11 +54,28 @@ func TestDuration_UnmarshalYAML(t *testing.T) {
 	}
 }
 
+func TestEdgePolicy_ReloadIntervalBounds(t *testing.T) {
+	for _, interval := range []time.Duration{-time.Second, time.Millisecond, 25 * time.Hour} {
+		cfg := validConfig()
+		cfg.Receivers.OTLPGRPC.CredentialReloadInterval = Duration(interval)
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate interval %s: expected error", interval)
+		}
+	}
+	cfg := validConfig()
+	cfg.Receivers.OTLPGRPC.CredentialReloadInterval = Duration(time.Second)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate 1s: %v", err)
+	}
+}
+
 func TestParse_Receivers(t *testing.T) {
 	doc := []byte(`
 receivers:
   otlp_grpc:
     endpoint: "0.0.0.0:4317"
+    insecure: true
+    credential_reload_interval: 2s
   jaeger_thrift_http:
     endpoint: "0.0.0.0:14250"
   zipkin_http:
@@ -72,6 +89,10 @@ exporters:
 	}
 	if cfg.Receivers.OTLPGRPC == nil || cfg.Receivers.OTLPGRPC.Endpoint != "0.0.0.0:4317" {
 		t.Errorf("otlp_grpc not parsed: %+v", cfg.Receivers.OTLPGRPC)
+	}
+	if !cfg.Receivers.OTLPGRPC.Insecure ||
+		cfg.Receivers.OTLPGRPC.CredentialReloadInterval.Std() != 2*time.Second {
+		t.Errorf("otlp_grpc edge policy not parsed: %+v", cfg.Receivers.OTLPGRPC.EdgePolicyConfig)
 	}
 	if cfg.Receivers.JaegerThriftHTTP == nil || cfg.Receivers.JaegerThriftHTTP.Endpoint != "0.0.0.0:14250" {
 		t.Errorf("jaeger_thrift_http not parsed: %+v", cfg.Receivers.JaegerThriftHTTP)

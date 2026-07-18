@@ -15,7 +15,7 @@ import (
 
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/reef/bearer"
-	"github.com/yaop-labs/reef/reefclient"
+	"github.com/yaop-labs/reef/edge"
 )
 
 func attr(kvs []*commonpb.KeyValue, key string) *commonpb.AnyValue {
@@ -114,7 +114,10 @@ func TestAmberExporter_SendsBearerToken(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	exp, err := New(srv.URL, time.Second, reefclient.Config{Auth: &bearer.ClientConfig{Token: "secret"}})
+	exp, err := New(srv.URL, time.Second, edge.ClientConfig{
+		Auth:                           &bearer.ClientConfig{Token: "secret"},
+		DangerAllowBearerOverPlaintext: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +141,7 @@ func TestToTraceRequest_RootSpanHasNoParent(t *testing.T) {
 func TestEndpointNormalization(t *testing.T) {
 	// Both forms must resolve to the same /v1/traces URL.
 	for _, ep := range []string{"http://h:8080", "http://h:8080/", "http://h:8080/v1/traces"} {
-		e, err := New(ep, 0)
+		e, err := New(ep, 0, edge.ClientConfig{Insecure: true})
 		if err != nil {
 			t.Fatal(err)
 		}
