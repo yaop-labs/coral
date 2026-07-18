@@ -15,6 +15,7 @@ import (
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -202,6 +203,22 @@ func logEdgeWarnings(transport string, warnings []edge.Warning) {
 	}
 }
 
+func wispUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	if _, err := parseWispHeaders(firstMetadata(md, "x-wisp-envelope-id"), firstMetadata(md, "x-wisp-signal-kind")); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return handler(ctx, req)
+}
+
+func firstMetadata(md metadata.MD, key string) string {
+	v := md.Get(key)
+	if len(v) == 0 {
+		return ""
+	}
+	return v[0]
+}
+
 // Start binds the listeners and begins serving, returning once both are bound
 // (or a bind fails). It does not block; call Stop to shut down. Start must run
 // after the target pipelines are started, since it feeds them via Sink.
@@ -257,7 +274,7 @@ func (s *Server) Start() error {
 	}
 
 	if grpcLn != nil {
-		serverOpts := append([]grpc.ServerOption{grpc.MaxRecvMsgSize(s.maxRecv)}, s.grpcEdge.Options...)
+		serverOpts := append([]grpc.ServerOption{grpc.MaxRecvMsgSize(s.maxRecv), grpc.UnaryInterceptor(wispUnaryInterceptor)}, s.grpcEdge.Options...)
 		srv := grpc.NewServer(serverOpts...)
 		if s.sink.Traces != nil {
 			coltracepb.RegisterTraceServiceServer(srv, &grpcTraceService{s: s})
