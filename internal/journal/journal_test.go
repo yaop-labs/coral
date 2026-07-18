@@ -103,6 +103,22 @@ func TestJournalCompactOlderThan(t *testing.T) {
 	}
 }
 
+func TestJournalFsyncFailureIsNotSuccess(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.syncFn = func() error { return os.ErrPermission }
+	if err = j.Append([]byte("x")); err == nil {
+		t.Fatal("append succeeded despite fsync failure")
+	}
+	bytes, _ := j.Stats()
+	if bytes != 0 {
+		t.Fatalf("size=%d after failed fsync", bytes)
+	}
+	_ = j.Close()
+}
+
 func TestJournalRejectsCorruptionAndFull(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "j.log")
 	j, err := Open(p, 16)

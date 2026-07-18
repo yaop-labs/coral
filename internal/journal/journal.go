@@ -17,6 +17,7 @@ var ErrFull = errors.New("journal byte limit exceeded")
 type Journal struct {
 	mu       sync.Mutex
 	f        *os.File
+	syncFn   func() error
 	maxBytes int64
 	size     int64
 }
@@ -86,7 +87,7 @@ func Open(path string, maxBytes int64) (*Journal, error) {
 		_ = f.Close()
 		return nil, ErrFull
 	}
-	return &Journal{f: f, maxBytes: maxBytes, size: st.Size()}, nil
+	return &Journal{f: f, syncFn: f.Sync, maxBytes: maxBytes, size: st.Size()}, nil
 }
 
 func (j *Journal) Append(payload []byte) error {
@@ -108,7 +109,7 @@ func (j *Journal) Append(payload []byte) error {
 	if _, err := j.f.Write(payload); err != nil {
 		return err
 	}
-	if err := j.f.Sync(); err != nil {
+	if err := j.syncFn(); err != nil {
 		return err
 	}
 	j.size += recordSize
@@ -204,7 +205,7 @@ func (j *Journal) Compact() error {
 	if _, err := j.f.Seek(0, io.SeekEnd); err != nil {
 		return err
 	}
-	if err := j.f.Sync(); err != nil {
+	if err := j.syncFn(); err != nil {
 		return err
 	}
 	j.size = 0
@@ -258,7 +259,7 @@ func (j *Journal) CompactOlderThan(age time.Duration) error {
 	if _, err := j.f.Write(kept); err != nil {
 		return err
 	}
-	if err := j.f.Sync(); err != nil {
+	if err := j.syncFn(); err != nil {
 		return err
 	}
 	j.size = int64(len(kept))
