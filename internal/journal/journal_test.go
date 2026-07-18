@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestJournalAppendReplayAndReopen(t *testing.T) {
@@ -30,6 +31,45 @@ func TestJournalAppendReplayAndReopen(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
 		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestJournalCompactOlderThan(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "j.log")
+	j, err := Open(p, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := EncodeEnvelope(Envelope{Signal: "logs", CreatedUnixNano: time.Now().Add(-time.Hour).UnixNano(), Payload: []byte("old")})
+	fresh := EncodeEnvelope(Envelope{Signal: "logs", CreatedUnixNano: time.Now().UnixNano(), Payload: []byte("fresh")})
+	if err = j.Append(old); err != nil {
+		t.Fatal(err)
+	}
+	if err = j.Append(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if err = j.CompactOlderThan(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	_ = j.Close()
+	j, err = Open(p, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var n int
+	if err = j.Replay(func(b []byte) error {
+		n++
+		e, _ := DecodeEnvelope(b)
+		if string(e.Payload) != "fresh" {
+			t.Fatalf("payload=%q", e.Payload)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("records=%d", n)
 	}
 }
 

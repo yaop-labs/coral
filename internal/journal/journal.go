@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 )
 
 var ErrFull = errors.New("journal byte limit exceeded")
@@ -207,5 +208,59 @@ func (j *Journal) Compact() error {
 		return err
 	}
 	j.size = 0
+	return nil
+}
+
+func (j *Journal) CompactOlderThan(age time.Duration) error {
+	if age <= 0 {
+		return nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if _, err := j.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	raw, err := io.ReadAll(j.f)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	kept := make([]byte, 0, len(raw))
+	off := 0
+	for off < len(raw) {
+		if len(raw)-off < 8 {
+			return io.ErrUnexpectedEOF
+		}
+		n := int(binary.BigEndian.Uint32(raw[off : off+4]))
+		end := off + 8 + n
+		if n < 0 || end > len(raw) {
+			return io.ErrUnexpectedEOF
+		}
+		payload := raw[off+8 : end]
+		if crc32.ChecksumIEEE(payload) != binary.BigEndian.Uint32(raw[off+4:off+8]) {
+			return fmt.Errorf("journal checksum mismatch")
+		}
+		keep := true
+		if env, e := DecodeEnvelope(payload); e == nil && env.CreatedUnixNano > 0 {
+			keep = now.Sub(time.Unix(0, env.CreatedUnixNano)) <= age
+		}
+		if keep {
+			kept = append(kept, raw[off:end]...)
+		}
+		off = end
+	}
+	if err := j.f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := j.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := j.f.Write(kept); err != nil {
+		return err
+	}
+	if err := j.f.Sync(); err != nil {
+		return err
+	}
+	j.size = int64(len(kept))
 	return nil
 }
