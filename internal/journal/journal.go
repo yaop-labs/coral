@@ -80,6 +80,9 @@ func Open(path string, maxBytes int64) (*Journal, error) {
 func (j *Journal) Append(payload []byte) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if int64(len(payload)) > j.maxBytes-8 {
+		return ErrFull
+	}
 	recordSize := int64(8 + len(payload))
 	if j.size+recordSize > j.maxBytes {
 		return ErrFull
