@@ -20,6 +20,7 @@ import (
 	fathomexp "github.com/yaop-labs/coral/internal/exporter/fathom"
 	retryexp "github.com/yaop-labs/coral/internal/exporter/retry"
 	s3exp "github.com/yaop-labs/coral/internal/exporter/s3"
+	"github.com/yaop-labs/coral/internal/journal"
 	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
@@ -543,6 +544,25 @@ func (a *App) Start(ctx context.Context) error {
 			return a.startFailed("otlp_ingress", err)
 		}
 		a.ingressStarted = true
+		if err := a.ingress.ReplayRouted(func(env journal.Envelope) error {
+			return otlprecv.ReplayEnvelope(ctx, env, otlprecv.ReplaySinks{
+				Traces: a.pipeline.Enqueue,
+				Metrics: func(c context.Context, b metric.Batch) error {
+					if a.metricPipeline == nil {
+						return fmt.Errorf("metric pipeline unavailable")
+					}
+					return a.metricPipeline.Enqueue(c, b)
+				},
+				Logs: func(c context.Context, b logs.Batch) error {
+					if a.logPipeline == nil {
+						return fmt.Errorf("log pipeline unavailable")
+					}
+					return a.logPipeline.Enqueue(c, b)
+				},
+			})
+		}); err != nil {
+			return a.startFailed("journal_replay", err)
+		}
 	}
 	a.transition(gyre.StateReady, "ready", "component is accepting telemetry")
 	return nil
