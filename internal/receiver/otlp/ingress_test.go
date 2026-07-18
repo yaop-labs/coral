@@ -526,6 +526,9 @@ func TestLogRecordLimitsRejectBeforeSink(t *testing.T) {
 	if called {
 		t.Fatal("log sink called for rejected record")
 	}
+	if got := s.LogLimitRejected(); got != 1 {
+		t.Fatalf("log limit rejects = %d, want 1", got)
+	}
 }
 
 func TestTenantConcurrentAdmission(t *testing.T) {

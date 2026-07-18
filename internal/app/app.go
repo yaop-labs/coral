@@ -821,6 +821,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 		if a.ingress != nil {
 			req, errs, accSpans, accPoints, accRecords := a.ingress.Stats()
 			rejSpans, rejPoints, rejRecords := a.ingress.Rejected()
+			logLimitRejected := a.ingress.LogLimitRejected()
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_requests counter\ncoral_otlp_requests %d\n", req)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_errors counter\ncoral_otlp_errors %d\n", errs)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_accepted_spans counter\ncoral_otlp_accepted_spans %d\n", accSpans)
@@ -829,6 +830,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_spans counter\ncoral_otlp_rejected_spans %d\n", rejSpans)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_points counter\ncoral_otlp_rejected_points %d\n", rejPoints)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_records counter\ncoral_otlp_rejected_records %d\n", rejRecords)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_log_limit_rejected counter\ncoral_otlp_log_limit_rejected %d\n", logLimitRejected)
 		}
 		a.credentialObs.writePrometheus(w)
 	})

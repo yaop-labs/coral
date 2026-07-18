@@ -41,6 +41,8 @@ tested, documented increment.
   record attributes, with the same fail-before-acknowledgement semantics.
 - Added configurable per-tenant `max_log_attribute_keys` to bound distinct
   attribute-key cardinality across each log request.
+- Added `coral_otlp_log_limit_rejected` self-observability counter, separate
+  from partial-success record rejects and quota overload.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 

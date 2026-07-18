@@ -151,17 +151,18 @@ type Server struct {
 	mu    sync.Mutex
 	ready chan struct{} // closed once listeners are bound (or bind failed)
 
-	requests       atomic.Uint64
-	errs           atomic.Uint64
-	tracesAccepted atomic.Uint64
-	pointsAccepted atomic.Uint64
-	logsAccepted   atomic.Uint64
-	tracesRejected atomic.Uint64
-	pointsRejected atomic.Uint64
-	logsRejected   atomic.Uint64
-	dedupHits      atomic.Uint64
-	dedupConflicts atomic.Uint64
-	dedupMisses    atomic.Uint64
+	requests         atomic.Uint64
+	errs             atomic.Uint64
+	tracesAccepted   atomic.Uint64
+	pointsAccepted   atomic.Uint64
+	logsAccepted     atomic.Uint64
+	tracesRejected   atomic.Uint64
+	pointsRejected   atomic.Uint64
+	logsRejected     atomic.Uint64
+	logLimitRejected atomic.Uint64
+	dedupHits        atomic.Uint64
+	dedupConflicts   atomic.Uint64
+	dedupMisses      atomic.Uint64
 }
 
 type deliveryIDContextKey struct{}
@@ -752,6 +753,8 @@ func (s *Server) Rejected() (traces, points, logs uint64) {
 	return s.tracesRejected.Load(), s.pointsRejected.Load(), s.logsRejected.Load()
 }
 
+func (s *Server) LogLimitRejected() uint64 { return s.logLimitRejected.Load() }
+
 // --- accept-time admission ---
 
 // admitTraces applies the trace admit hook (if any), enqueues the admitted
@@ -847,6 +850,7 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 				for _, scope := range resource.GetScopeLogs() {
 					for _, record := range scope.GetLogRecords() {
 						if proto.Size(record) > limit {
+							s.logLimitRejected.Add(1)
 							return 0, "", errLogRecordTooLarge
 						}
 					}
@@ -856,14 +860,17 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 		if limit := limits.MaxLogAttributes; limit > 0 {
 			for _, resource := range rl {
 				if len(resource.GetResource().GetAttributes()) > limit {
+					s.logLimitRejected.Add(1)
 					return 0, "", errLogRecordTooLarge
 				}
 				for _, scope := range resource.GetScopeLogs() {
 					if len(scope.GetScope().GetAttributes()) > limit {
+						s.logLimitRejected.Add(1)
 						return 0, "", errLogRecordTooLarge
 					}
 					for _, record := range scope.GetLogRecords() {
 						if len(record.GetAttributes()) > limit {
+							s.logLimitRejected.Add(1)
 							return 0, "", errLogRecordTooLarge
 						}
 					}
@@ -883,14 +890,17 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 			}
 			for _, resource := range rl {
 				if !addKeys(resource.GetResource().GetAttributes()) {
+					s.logLimitRejected.Add(1)
 					return 0, "", errLogRecordTooLarge
 				}
 				for _, scope := range resource.GetScopeLogs() {
 					if !addKeys(scope.GetScope().GetAttributes()) {
+						s.logLimitRejected.Add(1)
 						return 0, "", errLogRecordTooLarge
 					}
 					for _, record := range scope.GetLogRecords() {
 						if !addKeys(record.GetAttributes()) {
+							s.logLimitRejected.Add(1)
 							return 0, "", errLogRecordTooLarge
 						}
 					}
