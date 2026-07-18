@@ -57,6 +57,7 @@ type TenantLimit struct {
 	MaxLogRecordBytes    int   `yaml:"max_log_record_bytes"`
 	MaxLogAttributes     int   `yaml:"max_log_attributes"`
 	MaxLogAttributeKeys  int   `yaml:"max_log_attribute_keys"`
+	MaxMetricAttributes  int   `yaml:"max_metric_attributes"`
 }
 
 // PipelineConfig configures pipeline concurrency.
@@ -323,6 +324,9 @@ func (c *Config) Validate() error {
 		}
 		if limit.MaxLogAttributeKeys < 0 || limit.MaxLogAttributeKeys > 1000000 {
 			return fmt.Errorf("tenant_limits[%q].max_log_attribute_keys out of range", tenant)
+		}
+		if limit.MaxMetricAttributes < 0 || limit.MaxMetricAttributes > 1000000 {
+			return fmt.Errorf("tenant_limits[%q].max_metric_attributes out of range", tenant)
 		}
 	}
 	if c.JournalMaxBytes < 0 || c.JournalMaxBytes > (1<<40) {

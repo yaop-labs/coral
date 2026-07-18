@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -39,17 +40,47 @@ import (
 )
 
 var (
-	errTenantQuota       = errors.New("tenant quota exceeded")
-	errTenantConcurrency = errors.New("tenant concurrency quota exceeded")
-	errTenantRate        = errors.New("tenant request rate quota exceeded")
-	errLogRecordTooLarge = errors.New("log record exceeds tenant limit")
+	errTenantQuota             = errors.New("tenant quota exceeded")
+	errTenantConcurrency       = errors.New("tenant concurrency quota exceeded")
+	errTenantRate              = errors.New("tenant request rate quota exceeded")
+	errLogRecordTooLarge       = errors.New("log record exceeds tenant limit")
+	errMetricAttributesTooMany = errors.New("metric attributes exceed tenant limit")
 )
 
 func admissionOverload(err error) bool {
 	return errors.Is(err, errTenantQuota) || errors.Is(err, errTenantConcurrency) || errors.Is(err, errTenantRate)
 }
 
-func admissionPermanent(err error) bool { return errors.Is(err, errLogRecordTooLarge) }
+func admissionPermanent(err error) bool {
+	return errors.Is(err, errLogRecordTooLarge) || errors.Is(err, errMetricAttributesTooMany)
+}
+
+func metricAttributeCount(m proto.Message, limit int) int {
+	count := 0
+	var walk func(protoreflect.Message)
+	walk = func(msg protoreflect.Message) {
+		msg.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+			if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
+				if fd.IsList() {
+					list := v.List()
+					for i := 0; i < list.Len(); i++ {
+						if fd.Name() == "attributes" {
+							count++
+						}
+						walk(list.Get(i).Message())
+					}
+				} else if fd.IsMap() {
+					return true
+				} else {
+					walk(v.Message())
+				}
+			}
+			return count <= limit
+		})
+	}
+	walk(m.ProtoReflect())
+	return count
+}
 
 const defaultMaxRecvBytes = 16 << 20
 
@@ -206,6 +237,7 @@ type TenantLimit struct {
 	MaxLogRecordBytes    int
 	MaxLogAttributes     int
 	MaxLogAttributeKeys  int
+	MaxMetricAttributes  int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -806,6 +838,14 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 		return 0, "", admissionErr
 	}
 	defer release()
+	if tenant, ok := TenantFromContext(ctx); ok {
+		if limit := s.tenantLimits[tenant].MaxMetricAttributes; limit > 0 {
+			request := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rm}
+			if metricAttributeCount(request, limit) > limit {
+				return 0, "", errMetricAttributesTooMany
+			}
+		}
+	}
 	b := metric.Batch{ResourceMetrics: rm}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
 		if tenant, ok := TenantFromContext(ctx); ok {

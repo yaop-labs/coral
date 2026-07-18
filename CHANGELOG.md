@@ -49,6 +49,8 @@ tested, documented increment.
   `/metrics`, without envelope-ID labels.
 - Reconciled Increment 9 progress: bounded log admission is implemented;
   per-record partial-success aggregation and downstream retrieval remain open.
+- Added tenant `max_metric_attributes` admission bound using lossless OTLP
+  reflection; violations are rejected before sink/journal.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 

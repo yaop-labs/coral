@@ -52,6 +52,7 @@ tenant_limits:
     max_log_record_bytes: 1048576
     max_log_attributes: 128
     max_log_attribute_keys: 4096
+    max_metric_attributes: 4096
 ```
 
 ## Security
