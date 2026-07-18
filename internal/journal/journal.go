@@ -178,3 +178,20 @@ func (j *Journal) Stats() (bytes, maxBytes int64) {
 	defer j.mu.Unlock()
 	return j.size, j.maxBytes
 }
+
+// Compact removes all records after the caller has durably replayed them.
+func (j *Journal) Compact() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if err := j.f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := j.f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	if err := j.f.Sync(); err != nil {
+		return err
+	}
+	j.size = 0
+	return nil
+}

@@ -563,6 +563,9 @@ func (a *App) Start(ctx context.Context) error {
 		}); err != nil {
 			return a.startFailed("journal_replay", err)
 		}
+		if err := a.ingress.CompactJournal(); err != nil {
+			return a.startFailed("journal_compact", err)
+		}
 	}
 	a.transition(gyre.StateReady, "ready", "component is accepting telemetry")
 	return nil

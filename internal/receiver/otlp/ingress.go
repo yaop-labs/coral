@@ -348,6 +348,13 @@ func (s *Server) ReplayRouted(fn func(journal.Envelope) error) error {
 	})
 }
 
+func (s *Server) CompactJournal() error {
+	if s.journal == nil {
+		return nil
+	}
+	return s.journal.Compact()
+}
+
 func (s *Server) JournalStats() (bytes, maxBytes int64) {
 	if s.journal == nil {
 		return 0, 0
