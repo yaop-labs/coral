@@ -81,6 +81,13 @@ type TailSampler struct {
 	closeOnce sync.Once
 }
 
+// Stats returns the currently buffered trace count and byte usage.
+func (ts *TailSampler) Stats() (pendingTraces int, pendingBytes int64) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return len(ts.pending), ts.currentBytes
+}
+
 func NewTail(
 	decisionWait time.Duration,
 	maxTraces int,
