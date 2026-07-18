@@ -131,3 +131,30 @@ func TestEnvelopeJournalRecovery(t *testing.T) {
 		t.Fatalf("got %#v", got)
 	}
 }
+
+func TestJournalCompactClearsRecords(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "j.log")
+	j, err := Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = j.Append([]byte("done")); err != nil {
+		t.Fatal(err)
+	}
+	if err = j.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	_ = j.Close()
+	j, err = Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var count int
+	if err = j.Replay(func([]byte) error { count++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("replayed %d compacted records", count)
+	}
+}
