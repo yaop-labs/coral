@@ -70,6 +70,8 @@ tested, documented increment.
 - Made tail sampler `Close` idempotent for repeated lifecycle shutdown calls.
 - Made tail sampler `Start` idempotent so repeated lifecycle starts cannot
   create duplicate ticker goroutines.
+- Reconciled Increment 11 progress with bounded sampler lifecycle and stats;
+  tenant-aware keying and restart checkpoints remain open.
 - Exposed thread-safe tail sampler pending trace/byte stats for bounded
   self-observability wiring.
 - Recorded the remaining trace boundary explicitly: the current sampler is
