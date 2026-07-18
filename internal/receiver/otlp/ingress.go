@@ -216,9 +216,13 @@ func (s *Server) Start() error {
 		s.httpLn = httpLn
 		s.httpCancel = cancel
 		s.httpSrv = &http.Server{
-			Handler:     tracked,
-			ReadTimeout: 10 * time.Second,
-			BaseContext: func(net.Listener) context.Context { return handlerCtx },
+			Handler:           tracked,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+			BaseContext:       func(net.Listener) context.Context { return handlerCtx },
 		}
 		httpSrv := s.httpSrv
 		s.mu.Unlock()

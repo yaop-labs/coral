@@ -17,6 +17,10 @@ durability rests on the wisp spool and the amber WAL at the edges (contract §1)
 Partially-invalid payloads are answered `200 + partial_success` so senders do
 not retry rejected records (contract §4).
 
+Fan-out destinations have independent bounded queues. A slow or retrying
+destination can drop from its own queue, but cannot delay delivery to the other
+exporters.
+
 ## Security
 
 OTLP gRPC and HTTP listeners support TLS, optional client-certificate
@@ -50,3 +54,28 @@ exporters:
     auth:
       token_file: "/run/coral/amber-token"
 ```
+
+The removed `metric_pipeline.receivers` and `log_pipeline.receivers` keys are
+rejected at startup. Move those endpoints to top-level `receivers`; all signals
+then share the standard OTLP ports.
+
+## Operations and development
+
+`coral --version` prints the release version, Git revision, modified state, and
+Go toolchain. `/metrics` exposes the same process-constant identity plus
+readiness state and per-signal input queue depth/capacity.
+
+Run the complete local gate with:
+
+```sh
+make verify
+make fuzz
+```
+
+Release packages are deterministic `.tar.gz` archives built by
+`scripts/package.sh`; tag builds publish archives and `SHA256SUMS` only after
+the release gate passes. The current architecture review, responsibility
+boundaries, and capability plan are in
+[`docs/REVIEW.md`](docs/REVIEW.md),
+[`ADR 0001`](docs/adr/0001-coral-role-and-boundaries.md), and
+[`docs/ROADMAP.md`](docs/ROADMAP.md).

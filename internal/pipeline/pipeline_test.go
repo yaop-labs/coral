@@ -495,6 +495,19 @@ func TestPipeline_Enqueue_CountsDropOnBackpressure(t *testing.T) {
 	}
 }
 
+func TestPipeline_QueueDepth(t *testing.T) {
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 2}, slog.Default())
+	if depth, capacity := p.QueueDepth(); depth != 0 || capacity != 2 {
+		t.Fatalf("empty QueueDepth() = (%d, %d), want (0, 2)", depth, capacity)
+	}
+	if err := p.Enqueue(context.Background(), model.Batch{Spans: []model.Span{{Name: "queued"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if depth, capacity := p.QueueDepth(); depth != 1 || capacity != 2 {
+		t.Fatalf("filled QueueDepth() = (%d, %d), want (1, 2)", depth, capacity)
+	}
+}
+
 func TestPipeline_Shutdown_Idempotent(t *testing.T) {
 	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
 	exp := &capturingExporter{}

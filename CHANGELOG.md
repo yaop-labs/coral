@@ -9,7 +9,14 @@ tested, documented increment.
 ### Added
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
+- Process build identity via `--version`, startup logs, and
+  `coral_build_info`.
+- Readiness state/reason and per-signal input queue depth/capacity metrics.
+- CI gates for formatting, vet, lint, race tests, fuzz smoke, and reproducible
+  packages.
+- Deterministic cross-platform release archives with SHA-256 checksums.
 
 ### Changed
 
-- No runtime or public contract changes yet.
+- HTTP operational and OTLP servers now set explicit header/read/write/idle
+  timeouts and header limits.

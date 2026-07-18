@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/yaop-labs/coral/internal/buildinfo"
 	"github.com/yaop-labs/coral/internal/config"
 	amberexp "github.com/yaop-labs/coral/internal/exporter/amber"
 	"github.com/yaop-labs/coral/internal/exporter/devnull"
@@ -43,7 +46,29 @@ type App struct {
 	startHooks []func(context.Context) error
 	stopHooks  []func(context.Context) error
 
-	ready atomic.Bool // set once all pipelines and the ingress are started
+	readiness atomic.Uint32
+}
+
+type readinessState uint32
+
+const (
+	readinessStarting readinessState = iota
+	readinessReady
+	readinessStopping
+	readinessFailed
+)
+
+func (s readinessState) String() string {
+	switch s {
+	case readinessReady:
+		return "ready"
+	case readinessStopping:
+		return "stopping"
+	case readinessFailed:
+		return "failed"
+	default:
+		return "starting"
+	}
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -355,35 +380,40 @@ func (a *App) OTLPGRPCAddr() string {
 func (a *App) Start(ctx context.Context) error {
 	for _, hook := range a.startHooks {
 		if err := hook(ctx); err != nil {
+			a.readiness.Store(uint32(readinessFailed))
 			return err
 		}
 	}
 	if a.metricPipeline != nil {
 		if err := a.metricPipeline.Start(ctx); err != nil {
+			a.readiness.Store(uint32(readinessFailed))
 			return err
 		}
 	}
 	if a.logPipeline != nil {
 		if err := a.logPipeline.Start(ctx); err != nil {
+			a.readiness.Store(uint32(readinessFailed))
 			return err
 		}
 	}
 	if err := a.pipeline.Start(ctx); err != nil {
+		a.readiness.Store(uint32(readinessFailed))
 		return err
 	}
 	// The ingress starts last: every pipeline it feeds is already consuming, so
 	// no Enqueue can race a not-yet-started worker pool.
 	if a.ingress != nil {
 		if err := a.ingress.Start(); err != nil {
+			a.readiness.Store(uint32(readinessFailed))
 			return fmt.Errorf("otlp ingress: %w", err)
 		}
 	}
-	a.ready.Store(true)
+	a.readiness.Store(uint32(readinessReady))
 	return nil
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
-	a.ready.Store(false)
+	a.readiness.Store(uint32(readinessStopping))
 	// Stop accepting first: after Stop returns no ingress handler is mid-Enqueue,
 	// so it is safe to close the pipeline queues below.
 	if a.ingress != nil {
@@ -420,9 +450,17 @@ func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], endpoint strin
 		if err != nil {
 			return fmt.Errorf("metrics: listen %s: %w", endpoint, err)
 		}
-		srv = &http.Server{Handler: a.selfObsMux(p)}
+		srv = &http.Server{
+			Handler:           a.selfObsMux(p),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+		}
 		go func() {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && ctx.Err() == nil {
+				a.readiness.Store(uint32(readinessFailed))
 				a.logger.Error("metrics server error", "err", err)
 			}
 		}()
@@ -442,19 +480,42 @@ func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], endpoint strin
 func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		build := buildinfo.Current()
 		batchesIn, batchesDropped, spansOut := p.Stats()
+		traceQueueDepth, traceQueueCapacity := p.QueueDepth()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(w, "# TYPE coral_build_info gauge\ncoral_build_info{version=\"%s\",revision=\"%s\",modified=\"%s\",go_version=\"%s\"} 1\n",
+			prometheusLabelValue(build.Version),
+			prometheusLabelValue(build.Revision),
+			fmt.Sprintf("%t", build.Modified),
+			prometheusLabelValue(build.GoVersion),
+		)
+		state := readinessState(a.readiness.Load()).String()
+		ready := 0
+		if state == readinessReady.String() {
+			ready = 1
+		}
+		_, _ = fmt.Fprintf(w, "# TYPE coral_ready gauge\ncoral_ready %d\n", ready)
+		_, _ = fmt.Fprintf(w, "# TYPE coral_readiness_state gauge\ncoral_readiness_state{state=\"%s\"} 1\n",
+			prometheusLabelValue(state))
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_queue_depth gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_queue_capacity gauge")
+		writeQueueMetrics(w, "traces", traceQueueDepth, traceQueueCapacity)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_in counter\ncoral_batches_in %d\n", batchesIn)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_dropped counter\ncoral_batches_dropped %d\n", batchesDropped)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_spans_out counter\ncoral_spans_out %d\n", spansOut)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_trace_exporter_batches_dropped counter\ncoral_trace_exporter_batches_dropped %d\n", p.ExporterDrops())
 		if a.metricPipeline != nil {
 			_, _, pointsOut := a.metricPipeline.Stats()
+			depth, capacity := a.metricPipeline.QueueDepth()
+			writeQueueMetrics(w, "metrics", depth, capacity)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", pointsOut)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_exporter_batches_dropped counter\ncoral_metric_exporter_batches_dropped %d\n", a.metricPipeline.ExporterDrops())
 		}
 		if a.logPipeline != nil {
 			_, _, recordsOut := a.logPipeline.Stats()
+			depth, capacity := a.logPipeline.QueueDepth()
+			writeQueueMetrics(w, "logs", depth, capacity)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", recordsOut)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_exporter_batches_dropped counter\ncoral_log_exporter_batches_dropped %d\n", a.logPipeline.ExporterDrops())
 		}
@@ -475,13 +536,29 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if a.ready.Load() {
+		state := readinessState(a.readiness.Load())
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if state == readinessReady {
 			w.WriteHeader(http.StatusOK)
-			return
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = fmt.Fprintln(w, state.String())
 	})
 	return mux
+}
+
+func writeQueueMetrics(w http.ResponseWriter, signal string, depth, capacity int) {
+	_, _ = fmt.Fprintf(w, "coral_pipeline_queue_depth{signal=%q} %d\n",
+		signal, depth)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_queue_capacity{signal=%q} %d\n",
+		signal, capacity)
+}
+
+func prometheusLabelValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	return strings.ReplaceAll(value, `"`, `\"`)
 }
 
 // addReceivers attaches the legacy trace receivers (Jaeger/Zipkin) directly to
