@@ -401,10 +401,10 @@ durable or production-ready.
 
 ## Increment 8 — quotas, admission fairness, and complete OTLP partial success
 
-Progress: bounded per-tenant item/byte admission limits and tenant-isolated
-outcome counters and bounded max-concurrent admission are implemented. Fair
-scheduling, rate quotas,
-and complete downstream partial-success handling remain.
+Progress: bounded per-tenant item/byte admission limits, tenant-isolated
+outcome counters, bounded max-concurrent admission, and a one-second bounded
+request-rate window are implemented. Fair scheduling and complete downstream
+partial-success handling remain.
 
 **Goal.** Prevent one tenant or signal from exhausting shared capacity and make
 every rejection protocol-correct.

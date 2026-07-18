@@ -50,9 +50,10 @@ type Config struct {
 }
 
 type TenantLimit struct {
-	MaxItems      int   `yaml:"max_items"`
-	MaxBytes      int64 `yaml:"max_bytes"`
-	MaxConcurrent int   `yaml:"max_concurrent"`
+	MaxItems             int   `yaml:"max_items"`
+	MaxBytes             int64 `yaml:"max_bytes"`
+	MaxConcurrent        int   `yaml:"max_concurrent"`
+	MaxRequestsPerSecond int   `yaml:"max_requests_per_second"`
 }
 
 // PipelineConfig configures pipeline concurrency.
@@ -307,6 +308,9 @@ func (c *Config) Validate() error {
 		}
 		if limit.MaxConcurrent < 0 || limit.MaxConcurrent > 100000 {
 			return fmt.Errorf("tenant_limits[%q].max_concurrent out of range", tenant)
+		}
+		if limit.MaxRequestsPerSecond < 0 || limit.MaxRequestsPerSecond > 1000000 {
+			return fmt.Errorf("tenant_limits[%q].max_requests_per_second out of range", tenant)
 		}
 	}
 	if c.JournalMaxBytes < 0 || c.JournalMaxBytes > (1<<40) {

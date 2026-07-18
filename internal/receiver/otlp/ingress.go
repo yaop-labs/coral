@@ -117,6 +117,7 @@ type Server struct {
 	tenantStatsMu  sync.Mutex
 	tenantStats    map[string]TenantCounters
 	tenantInFlight map[string]int
+	tenantRate     map[string][]time.Time
 	dedup          *dedupWindow
 	journal        *journal.Journal
 	grpcSecurity   edge.ServerConfig
@@ -165,9 +166,10 @@ type SecurityConfig struct {
 }
 
 type TenantLimit struct {
-	MaxItems      int
-	MaxBytes      int64
-	MaxConcurrent int
+	MaxItems             int
+	MaxBytes             int64
+	MaxConcurrent        int
+	MaxRequestsPerSecond int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -206,7 +208,8 @@ func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
 		return func() {}, true
 	}
 	limit := s.tenantLimits[tenant].MaxConcurrent
-	if limit <= 0 {
+	rate := s.tenantLimits[tenant].MaxRequestsPerSecond
+	if limit <= 0 && rate <= 0 {
 		return func() {}, true
 	}
 	s.tenantStatsMu.Lock()
@@ -214,15 +217,40 @@ func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
 	if s.tenantInFlight == nil {
 		s.tenantInFlight = make(map[string]int)
 	}
+	if s.tenantRate == nil {
+		s.tenantRate = make(map[string][]time.Time)
+	}
 	if s.tenantStats == nil {
 		s.tenantStats = make(map[string]TenantCounters)
 	}
-	if s.tenantInFlight[tenant] >= limit {
-		s.tenantStats[tenant] = TenantCounters{QuotaRejected: s.tenantStats[tenant].QuotaRejected + 1}
+	if limit > 0 && s.tenantInFlight[tenant] >= limit {
+		c := s.tenantStats[tenant]
+		c.QuotaRejected++
+		s.tenantStats[tenant] = c
 		return func() {}, false
 	}
-	s.tenantInFlight[tenant]++
-	return func() { s.tenantStatsMu.Lock(); s.tenantInFlight[tenant]--; s.tenantStatsMu.Unlock() }, true
+	if rate > 0 {
+		now := time.Now()
+		cutoff := now.Add(-time.Second)
+		timestamps := s.tenantRate[tenant]
+		first := 0
+		for first < len(timestamps) && timestamps[first].After(cutoff) == false {
+			first++
+		}
+		timestamps = timestamps[first:]
+		if len(timestamps) >= rate {
+			c := s.tenantStats[tenant]
+			c.QuotaRejected++
+			s.tenantStats[tenant] = c
+			return func() {}, false
+		}
+		s.tenantRate[tenant] = append(timestamps, now)
+	}
+	if limit > 0 {
+		s.tenantInFlight[tenant]++
+		return func() { s.tenantStatsMu.Lock(); s.tenantInFlight[tenant]--; s.tenantStatsMu.Unlock() }, true
+	}
+	return func() {}, true
 }
 func (s *Server) TenantStats() map[string]TenantCounters {
 	s.tenantStatsMu.Lock()
@@ -277,6 +305,7 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		tenantLimits:   security.TenantLimits,
 		tenantStats:    makeTenantStats(security.TenantMap),
 		tenantInFlight: make(map[string]int),
+		tenantRate:     make(map[string][]time.Time),
 		journal:        admissionJournal,
 		dedup:          newDedupWindow(100000, 15*time.Minute),
 		grpcSecurity:   security.GRPC,

@@ -8,6 +8,10 @@ tested, documented increment.
 
 ### Added
 
+- Bounded per-tenant request-rate quotas (`max_requests_per_second`) with
+  tenant-isolated rejection counters; concurrency quota accounting preserves
+  existing accepted/rejected totals.
+
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and
   `coral_build_info`.

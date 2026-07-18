@@ -46,6 +46,9 @@ func TestTenantLimitBounds(t *testing.T) {
 	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_bytes: 1099511627777\n")); err == nil {
 		t.Fatal("accepted excessive tenant bytes")
 	}
+	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_requests_per_second: 1000001\n")); err == nil {
+		t.Fatal("accepted excessive tenant request rate")
+	}
 }
 
 func validConfig() Config {
