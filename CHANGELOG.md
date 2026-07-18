@@ -70,6 +70,8 @@ tested, documented increment.
 - Made tail sampler `Close` idempotent for repeated lifecycle shutdown calls.
 - Exposed thread-safe tail sampler pending trace/byte stats for bounded
   self-observability wiring.
+- Recorded the remaining trace boundary explicitly: the current sampler is
+  TraceID-keyed, while tenant-aware assembly and restart checkpoints remain.
 - Added Amber exporter coverage proving cumulative Sum temporality and
   monotonicity are preserved without implicit conversion.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
