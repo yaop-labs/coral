@@ -10,6 +10,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestPipelineBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{"negative workers", "pipeline:\n  workers: -1\n"},
+		{"excess workers", "pipeline:\n  workers: 1025\n"},
+		{"negative queue", "pipeline:\n  queue_size: -1\n"},
+		{"excess queue", "pipeline:\n  queue_size: 1000001\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tc.yaml)); err == nil {
+				t.Fatal("Parse succeeded for invalid pipeline bounds")
+			}
+		})
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		Receivers: ReceiversConfig{
