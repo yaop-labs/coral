@@ -9,6 +9,8 @@ import (
 	"github.com/yaop-labs/coral/internal/model"
 )
 
+type tenantContextKey struct{}
+
 func traceSpan(traceID byte, spanID byte, status model.SpanStatus) model.Span {
 	return model.Span{
 		TraceID: model.TraceID{traceID},
@@ -55,7 +57,7 @@ func TestTailSampler_TenantAwareTraceKeys(t *testing.T) {
 	var exported []model.Span
 	ts := NewTail(100*time.Millisecond, 10, 0, []Rule{ErrorRule{}}, makeExport(&mu, &exported))
 	ts.SetTenantExtractor(func(ctx context.Context) string {
-		v, _ := ctx.Value("tenant").(string)
+		v, _ := ctx.Value(tenantContextKey{}).(string)
 		return v
 	})
 	now := time.Now()
@@ -63,7 +65,7 @@ func TestTailSampler_TenantAwareTraceKeys(t *testing.T) {
 	for _, tenant := range []string{"a", "b"} {
 		s := traceSpan(9, tenant[0], model.StatusError)
 		s.StartTime = now
-		if _, err := ts.Process(context.WithValue(context.Background(), "tenant", tenant), model.Batch{Spans: []model.Span{s}}); err != nil {
+		if _, err := ts.Process(context.WithValue(context.Background(), tenantContextKey{}, tenant), model.Batch{Spans: []model.Span{s}}); err != nil {
 			t.Fatal(err)
 		}
 	}

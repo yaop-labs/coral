@@ -337,7 +337,7 @@ func (s *Server) acquireTenant(ctx context.Context) (func(), error) {
 		cutoff := now.Add(-time.Second)
 		timestamps := s.tenantRate[tenant]
 		first := 0
-		for first < len(timestamps) && timestamps[first].After(cutoff) == false {
+		for first < len(timestamps) && !timestamps[first].After(cutoff) {
 			first++
 		}
 		timestamps = timestamps[first:]
