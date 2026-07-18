@@ -20,6 +20,43 @@ type Journal struct {
 	size     int64
 }
 
+type Envelope struct {
+	Signal, Tenant string
+	Payload        []byte
+}
+
+func EncodeEnvelope(e Envelope) []byte {
+	b := make([]byte, 0, 5+len(e.Signal)+len(e.Tenant)+len(e.Payload))
+	b = append(b, 1, byte(len(e.Signal)))
+	b = append(b, e.Signal...)
+	b = append(b, byte(len(e.Tenant)))
+	b = append(b, e.Tenant...)
+	b = append(b, e.Payload...)
+	return b
+}
+
+func DecodeEnvelope(b []byte) (Envelope, error) {
+	if len(b) < 3 || b[0] != 1 {
+		return Envelope{}, fmt.Errorf("unsupported journal envelope")
+	}
+	i := 2
+	ns := int(b[1])
+	if i+ns+1 > len(b) {
+		return Envelope{}, fmt.Errorf("truncated journal envelope")
+	}
+	e := Envelope{Signal: string(b[i : i+ns])}
+	i += ns
+	nt := int(b[i])
+	i++
+	if i+nt > len(b) {
+		return Envelope{}, fmt.Errorf("truncated journal envelope")
+	}
+	e.Tenant = string(b[i : i+nt])
+	i += nt
+	e.Payload = append([]byte(nil), b[i:]...)
+	return e, nil
+}
+
 func Open(path string, maxBytes int64) (*Journal, error) {
 	if maxBytes <= 0 {
 		maxBytes = 1 << 30

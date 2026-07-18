@@ -95,3 +95,14 @@ func TestJournalRecoverTruncatedTail(t *testing.T) {
 		t.Fatalf("replayed=%d", n)
 	}
 }
+
+func TestEnvelopeRoundTrip(t *testing.T) {
+	want := Envelope{Signal: "traces", Tenant: "org/project", Payload: []byte("payload")}
+	got, err := DecodeEnvelope(EncodeEnvelope(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Signal != want.Signal || got.Tenant != want.Tenant || string(got.Payload) != string(want.Payload) {
+		t.Fatalf("got %#v", got)
+	}
+}
