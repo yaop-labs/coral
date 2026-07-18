@@ -9,16 +9,18 @@ complete, compatible, documented, and green.
 
 ## Current baseline
 
-`main` at `d99a4dbe21fd9c3562936a763e66bb9ae1dec1ee` provides unified OTLP
+`main` at `c8e44f4435927958b5dacb2cfcd81007ef809e2c` provides unified OTLP
 gRPC/HTTP for traces/metrics/logs, Reef TLS and bearer authentication,
 count-bounded queues, isolated exporter lanes, classified HTTP retry, trace
 oversize partial success, legacy Jaeger/Zipkin ingestion, build identity,
-readiness/queue metrics, CI, and deterministic release archives.
+readiness/queue metrics, CI, deterministic release archives, and a
+Gyre v0.5.0-conformant component lifecycle.
 
 The baseline is not durable or multi-tenant. It has no Wisp envelope support,
-storage/query API, or complete OTLP trace fidelity. Gyre v0.5.0 lifecycle
-adoption is the active feature increment. See `docs/REVIEW.md` for evidence and
-`docs/PLATFORM_COMPATIBILITY.md` for cross-repository boundaries.
+storage/query API, or complete OTLP trace fidelity. Bounded drain semantics and
+truthful byte/capacity accounting are the next feature increment. See
+`docs/REVIEW.md` for evidence and `docs/PLATFORM_COMPATIBILITY.md` for
+cross-repository boundaries.
 
 ## Increment 1 — operational identity and continuous verification
 
@@ -58,6 +60,10 @@ exact main commit's CI is verified.
 **Compatibility.** Additive. Development builds report `dev`/`unknown`.
 
 ## Increment 2 — Gyre v0.5.0 lifecycle conformance
+
+Status: completed and merged to `main` at
+`c8e44f4435927958b5dacb2cfcd81007ef809e2c`; GitHub Actions run `29626105651`
+passed.
 
 **Goal.** Make Coral a real Gyre component and remove lifecycle leaks before
 adding tenant or durability state.
