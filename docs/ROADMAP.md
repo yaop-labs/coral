@@ -464,9 +464,10 @@ tightening is an operator-controlled policy change.
 **Goal.** Provide safe log admission and explicit downstream storage/query
 integration without turning Coral into the log store.
 
-**Boundaries.** Preserve OTLP logs; enforce attribute/body/record limits,
-cardinality policy, configured redaction/privacy, tenant routing, and Amber
-storage contract. Define stable platform query expectations outside Coral.
+**Boundaries.** Preserve OTLP logs; enforce bounded request/item admission,
+configured redaction/privacy, tenant routing, and Amber storage contract.
+Per-record attribute/body limits and cardinality policy remain the next
+implementation slice. Define stable platform query expectations outside Coral.
 
 **Public contracts.** Standard OTLP plus versioned redaction/normalization
 policy. No hidden field removal. Pagination/query limits belong to the platform
