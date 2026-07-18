@@ -404,7 +404,9 @@ durable or production-ready.
 Progress: bounded per-tenant item/byte admission limits, tenant-isolated
 outcome counters, bounded max-concurrent admission, and a one-second bounded
 request-rate window are implemented. Fair scheduling and complete downstream
-partial-success handling remain.
+partial-success handling remain. Tenant overload is now classified as
+`ResourceExhausted`/`429`, while pipeline failures remain
+`Unavailable`/`503`.
 
 **Goal.** Prevent one tenant or signal from exhausting shared capacity and make
 every rejection protocol-correct.
