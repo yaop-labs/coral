@@ -335,6 +335,11 @@ headers begin failing deliberately; release notes call this out.
 
 ## Increment 7 — durable admission journal
 
+Implementation progress: bounded CRC-protected fsync journal, gRPC/HTTP append
+before acknowledgement, explicit replay API, lifecycle close, and pressure
+snapshot are implemented. Replay worker, compaction/age TTL, and crash-injected
+end-to-end recovery remain open before marking this increment complete.
+
 **Goal.** Close the Wisp → Coral → Amber acknowledgement gap.
 
 **Boundaries.** Persist accepted signal envelopes before OTLP success; replay
