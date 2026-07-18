@@ -42,14 +42,18 @@ func toTraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
 
 func spanToProto(s *model.Span) *tracepb.Span {
 	sp := &tracepb.Span{
-		TraceId:           append([]byte(nil), s.TraceID[:]...),
-		SpanId:            append([]byte(nil), s.SpanID[:]...),
-		Name:              s.Name,
-		Kind:              kindToProto(s.Kind),
-		StartTimeUnixNano: timeToNanos(s.StartTime),
-		EndTimeUnixNano:   timeToNanos(s.EndTime),
-		Attributes:        kvFromAttrs(s.Attrs),
-		Status:            &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg},
+		TraceId:                append([]byte(nil), s.TraceID[:]...),
+		SpanId:                 append([]byte(nil), s.SpanID[:]...),
+		Name:                   s.Name,
+		Kind:                   kindToProto(s.Kind),
+		StartTimeUnixNano:      timeToNanos(s.StartTime),
+		EndTimeUnixNano:        timeToNanos(s.EndTime),
+		Attributes:             kvFromAttrs(s.Attrs),
+		Status:                 &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg},
+		Flags:                  s.TraceFlags,
+		DroppedAttributesCount: s.DroppedAttributes,
+		DroppedEventsCount:     s.DroppedEvents,
+		DroppedLinksCount:      s.DroppedLinks,
 	}
 	if !s.ParentSpanID.IsZero() {
 		sp.ParentSpanId = append([]byte(nil), s.ParentSpanID[:]...)
