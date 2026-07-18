@@ -31,6 +31,7 @@ tested, documented increment.
   restoration into the bounded Wisp dedup window for gRPC and HTTP admissions.
 - Added an end-to-end replay regression test proving restored delivery IDs
   produce dedup hits before new admission.
+- Added fuzz coverage for malformed Wisp envelope and signal headers.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and

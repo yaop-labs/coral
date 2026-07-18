@@ -20,3 +20,12 @@ func TestParseWispHeadersStrict(t *testing.T) {
 		t.Fatalf("identity = %#v, err=%v", id, err)
 	}
 }
+
+func FuzzParseWispHeaders(f *testing.F) {
+	f.Add("", "")
+	f.Add("00112233445566778899aabbccddeeff", "traces")
+	f.Add("not-hex", "unknown")
+	f.Fuzz(func(t *testing.T, envelope, signal string) {
+		_, _ = parseWispHeaders(envelope, signal)
+	})
+}
