@@ -39,6 +39,15 @@ func TestJournalBounds(t *testing.T) {
 	}
 }
 
+func TestTenantLimitBounds(t *testing.T) {
+	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_items: -1\n")); err == nil {
+		t.Fatal("accepted negative tenant items")
+	}
+	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_bytes: 1099511627777\n")); err == nil {
+		t.Fatal("accepted excessive tenant bytes")
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		Receivers: ReceiversConfig{

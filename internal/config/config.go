@@ -294,6 +294,17 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	for tenant, limit := range c.TenantLimits {
+		if tenant == "" {
+			return fmt.Errorf("tenant_limits contains empty tenant")
+		}
+		if limit.MaxItems < 0 || limit.MaxItems > maxPipelineQueueSize {
+			return fmt.Errorf("tenant_limits[%q].max_items out of range", tenant)
+		}
+		if limit.MaxBytes < 0 || limit.MaxBytes > (1<<40) {
+			return fmt.Errorf("tenant_limits[%q].max_bytes out of range", tenant)
+		}
+	}
 	if c.JournalMaxBytes < 0 || c.JournalMaxBytes > (1<<40) {
 		return fmt.Errorf("journal_max_bytes must be between 0 and %d", 1<<40)
 	}
