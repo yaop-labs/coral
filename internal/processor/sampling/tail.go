@@ -27,12 +27,18 @@ type Rule interface {
 // PendingTrace holds all spans for one trace until a decision is made.
 type PendingTrace struct {
 	ID        model.TraceID
+	Tenant    string
 	Spans     []model.Span
 	FirstSeen time.Time
 	LastSeen  time.Time
 	HasError  bool
 	HasDebug  bool
 	HasRoot   bool
+}
+
+type traceKey struct {
+	tenant string
+	id     model.TraceID
 }
 
 func (pt *PendingTrace) add(s model.Span) {
@@ -71,9 +77,10 @@ type TailSampler struct {
 	export       func(context.Context, model.Batch) error
 
 	mu      sync.Mutex
-	pending map[model.TraceID]*PendingTrace
+	pending map[traceKey]*PendingTrace
 
-	decided *lru.Cache[model.TraceID, decision]
+	decided *lru.Cache[traceKey, decision]
+	tenant  func(context.Context) string
 
 	ticker    *time.Ticker
 	done      chan struct{}
@@ -106,7 +113,7 @@ func NewTail(
 	if len(maxBytes) > 0 && maxBytes[0] > 0 {
 		bytes = maxBytes[0]
 	}
-	cache, _ := lru.New[model.TraceID, decision](maxTraces * 2)
+	cache, _ := lru.New[traceKey, decision](maxTraces * 2)
 	return &TailSampler{
 		decisionWait: decisionWait,
 		maxTraces:    maxTraces,
@@ -114,11 +121,23 @@ func NewTail(
 		defaultRate:  defaultRate,
 		rules:        rules,
 		export:       export,
-		pending:      make(map[model.TraceID]*PendingTrace),
+		pending:      make(map[traceKey]*PendingTrace),
 		decided:      cache,
 		done:         make(chan struct{}),
 		now:          time.Now,
+		tenant:       func(context.Context) string { return "" },
 	}
+}
+
+// SetTenantExtractor configures the optional tenant identity used in trace
+// buffering and deduplication keys.
+func (ts *TailSampler) SetTenantExtractor(fn func(context.Context) string) {
+	if fn == nil {
+		fn = func(context.Context) string { return "" }
+	}
+	ts.mu.Lock()
+	ts.tenant = fn
+	ts.mu.Unlock()
 }
 
 // Process buffers spans by trace ID and returns an empty batch.
@@ -128,27 +147,29 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 
 	ts.mu.Lock()
 	now := ts.now()
+	tenant := ts.tenant(ctx)
 	for _, s := range b.Spans {
-		if d, ok := ts.decided.Get(s.TraceID); ok {
+		key := traceKey{tenant: tenant, id: s.TraceID}
+		if d, ok := ts.decided.Get(key); ok {
 			if d == decisionKeep {
 				emit = append(emit, model.Batch{Spans: []model.Span{s}})
 			}
 			continue
 		}
-		pt, ok := ts.pending[s.TraceID]
+		pt, ok := ts.pending[key]
 		if !ok {
 			if len(ts.pending) >= ts.maxTraces {
 				if evicted := ts.evictOldestLocked(); evicted != nil {
 					ts.currentBytes -= pendingBytes(evicted)
 					d := ts.decide(evicted)
-					ts.decided.Add(evicted.ID, d)
+					ts.decided.Add(traceKey{tenant: evicted.Tenant, id: evicted.ID}, d)
 					if d == decisionKeep {
 						emit = append(emit, model.Batch{Spans: evicted.Spans})
 					}
 				}
 			}
-			pt = &PendingTrace{ID: s.TraceID, FirstSeen: now}
-			ts.pending[s.TraceID] = pt
+			pt = &PendingTrace{ID: s.TraceID, Tenant: tenant, FirstSeen: now}
+			ts.pending[key] = pt
 		}
 		pt.add(s)
 		ts.currentBytes += int64(s.SizeBytes())
@@ -169,7 +190,7 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 }
 
 func (ts *TailSampler) evictOldestLocked() *PendingTrace {
-	var oldestID model.TraceID
+	var oldestID traceKey
 	var oldest *PendingTrace
 	for id, pt := range ts.pending {
 		if oldest == nil || pt.LastSeen.Before(oldest.LastSeen) {
@@ -225,7 +246,7 @@ func (ts *TailSampler) tickAt(ctx context.Context, now time.Time) {
 
 	for _, pt := range ready {
 		d := ts.decide(pt)
-		ts.decided.Add(pt.ID, d)
+		ts.decided.Add(traceKey{tenant: pt.Tenant, id: pt.ID}, d)
 		if d == decisionKeep {
 			_ = ts.export(ctx, model.Batch{Spans: pt.Spans})
 		}

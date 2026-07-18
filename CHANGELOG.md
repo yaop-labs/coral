@@ -70,12 +70,15 @@ tested, documented increment.
 - Made tail sampler `Close` idempotent for repeated lifecycle shutdown calls.
 - Made tail sampler `Start` idempotent so repeated lifecycle starts cannot
   create duplicate ticker goroutines.
-- Reconciled Increment 11 progress with bounded sampler lifecycle and stats;
-  tenant-aware keying and restart checkpoints remain open.
+- Reconciled Increment 11 progress with bounded sampler lifecycle, stats, and
+  tenant-aware keying; restart checkpoints remain open.
 - Exposed thread-safe tail sampler pending trace/byte stats for bounded
   self-observability wiring.
-- Recorded the remaining trace boundary explicitly: the current sampler is
-  TraceID-keyed, while tenant-aware assembly and restart checkpoints remain.
+- Recorded the remaining trace boundary explicitly: restart checkpoints and
+  complete late/incomplete observability remain open.
+- Tail sampler buffering and decision-cache keys now include the authenticated
+  tenant identity, preventing same-TraceID cross-tenant assembly or deduplication.
+- Added a regression test covering identical TraceIDs arriving for two tenants.
 - Added Amber exporter coverage proving cumulative Sum temporality and
   monotonicity are preserved without implicit conversion.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag

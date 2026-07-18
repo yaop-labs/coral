@@ -50,6 +50,34 @@ func TestTailSampler_ErrorRuleKeeps(t *testing.T) {
 	}
 }
 
+func TestTailSampler_TenantAwareTraceKeys(t *testing.T) {
+	var mu sync.Mutex
+	var exported []model.Span
+	ts := NewTail(100*time.Millisecond, 10, 0, []Rule{ErrorRule{}}, makeExport(&mu, &exported))
+	ts.SetTenantExtractor(func(ctx context.Context) string {
+		v, _ := ctx.Value("tenant").(string)
+		return v
+	})
+	now := time.Now()
+	ts.now = func() time.Time { return now }
+	for _, tenant := range []string{"a", "b"} {
+		s := traceSpan(9, tenant[0], model.StatusError)
+		s.StartTime = now
+		if _, err := ts.Process(context.WithValue(context.Background(), "tenant", tenant), model.Batch{Spans: []model.Span{s}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, _ := ts.Stats(); n != 2 {
+		t.Fatalf("expected two tenant-scoped pending traces, got %d", n)
+	}
+	ts.tickAt(context.Background(), now.Add(200*time.Millisecond))
+	mu.Lock()
+	defer mu.Unlock()
+	if len(exported) != 2 {
+		t.Fatalf("expected both tenant traces exported, got %d", len(exported))
+	}
+}
+
 func TestTailSampler_DropAtZeroRate(t *testing.T) {
 	var mu sync.Mutex
 	var exported []model.Span
@@ -275,8 +303,9 @@ func TestTailSampler_MaxTracesKeepsByteAccounting(t *testing.T) {
 	}
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if ts.currentBytes != pendingBytes(ts.pending[second.TraceID]) {
-		t.Fatalf("current bytes = %d, want pending second trace bytes %d", ts.currentBytes, pendingBytes(ts.pending[second.TraceID]))
+	key := traceKey{id: second.TraceID}
+	if ts.currentBytes != pendingBytes(ts.pending[key]) {
+		t.Fatalf("current bytes = %d, want pending second trace bytes %d", ts.currentBytes, pendingBytes(ts.pending[key]))
 	}
 }
 

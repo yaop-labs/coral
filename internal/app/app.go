@@ -992,6 +992,10 @@ func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline[model.Batch]
 				return p.ExportFrom(ctx, b, processorIndex+1)
 			}, cfg.MaxBytes,
 		)
+		ts.SetTenantExtractor(func(ctx context.Context) string {
+			tenant, _ := otlprecv.TenantFromContext(ctx)
+			return tenant
+		})
 		a.hooks = append(a.hooks, lifecycleHook{
 			start: func(ctx context.Context) error {
 				ts.Start(ctx)
