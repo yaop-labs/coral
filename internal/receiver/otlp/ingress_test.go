@@ -3,6 +3,7 @@ package otlp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -513,15 +514,15 @@ func TestTenantQuotaExceeded(t *testing.T) {
 func TestTenantConcurrentAdmission(t *testing.T) {
 	s := &Server{tenantLimits: map[string]TenantLimit{"tenant-a": {MaxConcurrent: 1}}, tenantStats: map[string]TenantCounters{"tenant-a": {}}}
 	ctx := context.WithValue(context.Background(), tenantContextKey{}, "tenant-a")
-	release, ok := s.acquireTenant(ctx)
-	if !ok {
+	release, err := s.acquireTenant(ctx)
+	if err != nil {
 		t.Fatal("first acquire denied")
 	}
-	if _, ok = s.acquireTenant(ctx); ok {
+	if _, err = s.acquireTenant(ctx); err == nil {
 		t.Fatal("second acquire allowed")
 	}
 	release()
-	if release2, ok := s.acquireTenant(ctx); !ok {
+	if release2, err := s.acquireTenant(ctx); err != nil {
 		t.Fatal("acquire after release denied")
 	} else {
 		release2()
@@ -531,13 +532,13 @@ func TestTenantConcurrentAdmission(t *testing.T) {
 func TestTenantRequestRateLimit(t *testing.T) {
 	s := &Server{tenantLimits: map[string]TenantLimit{"tenant-a": {MaxRequestsPerSecond: 1}}, tenantStats: map[string]TenantCounters{"tenant-a": {}}}
 	ctx := context.WithValue(context.Background(), tenantContextKey{}, "tenant-a")
-	release, ok := s.acquireTenant(ctx)
-	if !ok {
+	release, err := s.acquireTenant(ctx)
+	if err != nil {
 		t.Fatal("first acquire denied")
 	}
 	release()
-	if _, ok = s.acquireTenant(ctx); ok {
-		t.Fatal("second acquire within window allowed")
+	if _, err = s.acquireTenant(ctx); !errors.Is(err, errTenantRate) {
+		t.Fatalf("second acquire error = %v, want rate quota", err)
 	}
 	if got := s.TenantStats()["tenant-a"].QuotaRejected; got != 1 {
 		t.Fatalf("quota rejects = %d, want 1", got)

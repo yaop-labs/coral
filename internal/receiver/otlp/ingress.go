@@ -40,10 +40,11 @@ import (
 var (
 	errTenantQuota       = errors.New("tenant quota exceeded")
 	errTenantConcurrency = errors.New("tenant concurrency quota exceeded")
+	errTenantRate        = errors.New("tenant request rate quota exceeded")
 )
 
 func admissionOverload(err error) bool {
-	return errors.Is(err, errTenantQuota) || errors.Is(err, errTenantConcurrency)
+	return errors.Is(err, errTenantQuota) || errors.Is(err, errTenantConcurrency) || errors.Is(err, errTenantRate)
 }
 
 const defaultMaxRecvBytes = 16 << 20
@@ -211,15 +212,15 @@ func (s *Server) recordTenant(tenant string, accepted, rejected, quota bool) {
 	s.tenantStats[tenant] = c
 }
 
-func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
+func (s *Server) acquireTenant(ctx context.Context) (func(), error) {
 	tenant, ok := TenantFromContext(ctx)
 	if !ok {
-		return func() {}, true
+		return func() {}, nil
 	}
 	limit := s.tenantLimits[tenant].MaxConcurrent
 	rate := s.tenantLimits[tenant].MaxRequestsPerSecond
 	if limit <= 0 && rate <= 0 {
-		return func() {}, true
+		return func() {}, nil
 	}
 	s.tenantStatsMu.Lock()
 	defer s.tenantStatsMu.Unlock()
@@ -236,7 +237,7 @@ func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
 		c := s.tenantStats[tenant]
 		c.QuotaRejected++
 		s.tenantStats[tenant] = c
-		return func() {}, false
+		return func() {}, errTenantConcurrency
 	}
 	if rate > 0 {
 		now := time.Now()
@@ -251,15 +252,15 @@ func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
 			c := s.tenantStats[tenant]
 			c.QuotaRejected++
 			s.tenantStats[tenant] = c
-			return func() {}, false
+			return func() {}, errTenantRate
 		}
 		s.tenantRate[tenant] = append(timestamps, now)
 	}
 	if limit > 0 {
 		s.tenantInFlight[tenant]++
-		return func() { s.tenantStatsMu.Lock(); s.tenantInFlight[tenant]--; s.tenantStatsMu.Unlock() }, true
+		return func() { s.tenantStatsMu.Lock(); s.tenantInFlight[tenant]--; s.tenantStatsMu.Unlock() }, nil
 	}
-	return func() {}, true
+	return func() {}, nil
 }
 func (s *Server) TenantStats() map[string]TenantCounters {
 	s.tenantStatsMu.Lock()
@@ -723,9 +724,9 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 	if !ok {
 		return 0, "", errors.New("tenant principal is not authorized")
 	}
-	release, allowed := s.acquireTenant(ctx)
-	if !allowed {
-		return 0, "", errTenantConcurrency
+	release, admissionErr := s.acquireTenant(ctx)
+	if admissionErr != nil {
+		return 0, "", admissionErr
 	}
 	defer release()
 	b := model.Batch{Spans: spans}
@@ -759,9 +760,9 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 	if !ok {
 		return 0, "", errors.New("tenant principal is not authorized")
 	}
-	release, allowed := s.acquireTenant(ctx)
-	if !allowed {
-		return 0, "", errTenantConcurrency
+	release, admissionErr := s.acquireTenant(ctx)
+	if admissionErr != nil {
+		return 0, "", admissionErr
 	}
 	defer release()
 	b := metric.Batch{ResourceMetrics: rm}
@@ -795,9 +796,9 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 	if !ok {
 		return 0, "", errors.New("tenant principal is not authorized")
 	}
-	release, allowed := s.acquireTenant(ctx)
-	if !allowed {
-		return 0, "", errTenantConcurrency
+	release, admissionErr := s.acquireTenant(ctx)
+	if admissionErr != nil {
+		return 0, "", admissionErr
 	}
 	defer release()
 	b := logs.Batch{ResourceLogs: rl}
