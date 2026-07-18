@@ -823,6 +823,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			req, errs, accSpans, accPoints, accRecords := a.ingress.Stats()
 			rejSpans, rejPoints, rejRecords := a.ingress.Rejected()
 			logLimitRejected := a.ingress.LogLimitRejected()
+			dedupHits, dedupConflicts, dedupMisses, dedupEvictions := a.ingress.DedupStats()
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_requests counter\ncoral_otlp_requests %d\n", req)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_errors counter\ncoral_otlp_errors %d\n", errs)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_accepted_spans counter\ncoral_otlp_accepted_spans %d\n", accSpans)
@@ -832,6 +833,10 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_points counter\ncoral_otlp_rejected_points %d\n", rejPoints)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_records counter\ncoral_otlp_rejected_records %d\n", rejRecords)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_log_limit_rejected counter\ncoral_otlp_log_limit_rejected %d\n", logLimitRejected)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_wisp_dedup_hits counter\ncoral_wisp_dedup_hits %d\n", dedupHits)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_wisp_dedup_conflicts counter\ncoral_wisp_dedup_conflicts %d\n", dedupConflicts)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_wisp_dedup_misses counter\ncoral_wisp_dedup_misses %d\n", dedupMisses)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_wisp_dedup_evictions counter\ncoral_wisp_dedup_evictions %d\n", dedupEvictions)
 			tenantStats := a.ingress.TenantStats()
 			tenantNames := make([]string, 0, len(tenantStats))
 			for tenant := range tenantStats {

@@ -98,6 +98,11 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if !strings.Contains(body, "coral_otlp_tenant_accepted") {
 		t.Errorf("/metrics missing tenant admission counter:\n%s", body)
 	}
+	for _, metric := range []string{"coral_wisp_dedup_hits", "coral_wisp_dedup_conflicts", "coral_wisp_dedup_misses", "coral_wisp_dedup_evictions"} {
+		if !strings.Contains(body, metric) {
+			t.Errorf("/metrics missing %s", metric)
+		}
+	}
 	for _, metric := range []string{
 		"coral_build_info{",
 		"coral_ready 1",
