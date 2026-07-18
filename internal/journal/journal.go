@@ -98,3 +98,9 @@ func (j *Journal) Replay(fn func([]byte) error) error {
 }
 
 func (j *Journal) Close() error { j.mu.Lock(); defer j.mu.Unlock(); return j.f.Close() }
+
+func (j *Journal) Stats() (bytes, maxBytes int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.size, j.maxBytes
+}

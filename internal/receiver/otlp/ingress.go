@@ -327,6 +327,13 @@ func (s *Server) ReplayAdmission(fn func([]byte) error) error {
 	return s.journal.Replay(fn)
 }
 
+func (s *Server) JournalStats() (bytes, maxBytes int64) {
+	if s.journal == nil {
+		return 0, 0
+	}
+	return s.journal.Stats()
+}
+
 // Start binds the listeners and begins serving, returning once both are bound
 // (or a bind fails). It does not block; call Stop to shut down. Start must run
 // after the target pipelines are started, since it feeds them via Sink.
