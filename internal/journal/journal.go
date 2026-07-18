@@ -16,6 +16,8 @@ import (
 var ErrFull = errors.New("journal byte limit exceeded")
 var ErrEnvelopeTooLarge = errors.New("journal envelope field too large")
 
+const maxJournalRecordBytes = 64 << 20
+
 type Journal struct {
 	mu       sync.Mutex
 	f        *os.File
@@ -139,7 +141,7 @@ func (j *Journal) Replay(fn func([]byte) error) error {
 			return err
 		}
 		n := binary.BigEndian.Uint32(hdr[:4])
-		if n > uint32(j.maxBytes) {
+		if n > uint32(j.maxBytes) || n > maxJournalRecordBytes {
 			return fmt.Errorf("journal record too large")
 		}
 		payload := make([]byte, n)

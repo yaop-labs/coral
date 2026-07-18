@@ -17,6 +17,8 @@ tested, documented increment.
   the shared admission path for diagnostics and protocol responses.
 - Journal admission now rejects oversized tenant/signal routing fields instead
   of allowing one-byte length truncation and replay corruption.
+- Journal replay rejects oversized individual records before allocation and
+  includes fuzz coverage for untrusted envelope bytes.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and

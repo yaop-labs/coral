@@ -433,6 +433,8 @@ success is retained conservatively rather than dropped.
 
 Journal routing metadata is bounded explicitly; oversized tenant or signal
 identifiers are rejected before append and never acknowledged as durable.
+Replay also rejects oversized individual records before allocation, with fuzz
+coverage for malformed envelope bytes.
 
 **Observability.** Admission latency, quota utilization/rejections, partial
 success, request size, decompression ratio, and fairness lag with bounded labels.

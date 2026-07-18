@@ -8,6 +8,33 @@ import (
 	"time"
 )
 
+func FuzzDecodeEnvelope(f *testing.F) {
+	for _, seed := range [][]byte{{}, {2, 0, 0}, {2, 1, 'x', 0, 0, 0, 0, 0, 0, 0, 1}} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		_, _ = DecodeEnvelope(raw)
+	})
+}
+
+func TestReplayRejectsOversizedRecordBeforeAllocation(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "journal")
+	j, err := Open(p, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	if _, err := j.f.Write([]byte{0, 0, 0, 0x80, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Replay(func([]byte) error { t.Fatal("unexpected replay callback"); return nil }); err == nil {
+		t.Fatal("oversized record accepted")
+	}
+}
+
 func TestJournalProcessCrashRecovery(t *testing.T) {
 	if os.Getenv("CORAL_JOURNAL_CRASH_HELPER") == "1" {
 		j, err := Open(os.Getenv("CORAL_JOURNAL_CRASH_PATH"), 1024)
