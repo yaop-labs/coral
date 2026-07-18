@@ -461,6 +461,11 @@ tightening is an operator-controlled policy change.
 
 ## Increment 9 — logs capability contract
 
+Implementation progress: bounded per-tenant record bytes, attribute counts,
+distinct attribute-key cardinality, fail-before-journal semantics, configured
+redaction, and self-observability counters are implemented. Per-record
+partial-success aggregation and downstream Amber retrieval/retention remain.
+
 **Goal.** Provide safe log admission and explicit downstream storage/query
 integration without turning Coral into the log store.
 
