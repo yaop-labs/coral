@@ -330,6 +330,15 @@ func (c *Config) Validate() error {
 			}
 			switch pc.Type {
 			case "validate", "attributes", "batch", "tail_sampling":
+				if pc.Type == "tail_sampling" {
+					var tc TailSamplingConfig
+					if err := pc.Raw.Decode(&tc); err != nil {
+						return fmt.Errorf("processors[%d]: %w", i, err)
+					}
+					if tc.MaxBytes < 0 || tc.MaxBytes > (1<<40) {
+						return fmt.Errorf("processors[%d].max_bytes must be between 0 and %d", i, 1<<40)
+					}
+				}
 			case "head_sampling":
 				return fmt.Errorf("processors[%d]: head_sampling was removed; use tail_sampling", i)
 			default:
