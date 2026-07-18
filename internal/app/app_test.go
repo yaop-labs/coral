@@ -95,6 +95,9 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if !strings.Contains(body, "coral_otlp_log_limit_rejected") {
 		t.Errorf("/metrics missing log limit counter:\n%s", body)
 	}
+	if !strings.Contains(body, "coral_otlp_metric_limit_rejected") {
+		t.Errorf("/metrics missing metric limit counter:\n%s", body)
+	}
 	if !strings.Contains(body, "coral_otlp_tenant_accepted") {
 		t.Errorf("/metrics missing tenant admission counter:\n%s", body)
 	}

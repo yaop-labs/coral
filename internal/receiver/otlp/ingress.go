@@ -214,18 +214,19 @@ type Server struct {
 	mu    sync.Mutex
 	ready chan struct{} // closed once listeners are bound (or bind failed)
 
-	requests         atomic.Uint64
-	errs             atomic.Uint64
-	tracesAccepted   atomic.Uint64
-	pointsAccepted   atomic.Uint64
-	logsAccepted     atomic.Uint64
-	tracesRejected   atomic.Uint64
-	pointsRejected   atomic.Uint64
-	logsRejected     atomic.Uint64
-	logLimitRejected atomic.Uint64
-	dedupHits        atomic.Uint64
-	dedupConflicts   atomic.Uint64
-	dedupMisses      atomic.Uint64
+	requests            atomic.Uint64
+	errs                atomic.Uint64
+	tracesAccepted      atomic.Uint64
+	pointsAccepted      atomic.Uint64
+	logsAccepted        atomic.Uint64
+	tracesRejected      atomic.Uint64
+	pointsRejected      atomic.Uint64
+	logsRejected        atomic.Uint64
+	logLimitRejected    atomic.Uint64
+	metricLimitRejected atomic.Uint64
+	dedupHits           atomic.Uint64
+	dedupConflicts      atomic.Uint64
+	dedupMisses         atomic.Uint64
 }
 
 type deliveryIDContextKey struct{}
@@ -818,7 +819,8 @@ func (s *Server) Rejected() (traces, points, logs uint64) {
 	return s.tracesRejected.Load(), s.pointsRejected.Load(), s.logsRejected.Load()
 }
 
-func (s *Server) LogLimitRejected() uint64 { return s.logLimitRejected.Load() }
+func (s *Server) LogLimitRejected() uint64    { return s.logLimitRejected.Load() }
+func (s *Server) MetricLimitRejected() uint64 { return s.metricLimitRejected.Load() }
 
 // --- accept-time admission ---
 
@@ -875,12 +877,14 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 		if limit := s.tenantLimits[tenant].MaxMetricAttributes; limit > 0 {
 			request := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rm}
 			if metricAttributeCount(request, limit) > limit {
+				s.metricLimitRejected.Add(1)
 				return 0, "", errMetricAttributesTooMany
 			}
 		}
 		if limit := s.tenantLimits[tenant].MaxMetricAttributeKeys; limit > 0 {
 			request := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rm}
 			if metricAttributeKeyCount(request, limit) > limit {
+				s.metricLimitRejected.Add(1)
 				return 0, "", errMetricAttributesTooMany
 			}
 		}
