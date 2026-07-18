@@ -288,6 +288,10 @@ Multi-tenant activation is opt-in until migration is complete.
 
 ## Increment 6 — Wisp delivery identity and bounded deduplication
 
+Implementation progress: optional header validation and a bounded two-phase
+tenant/signal-aware dedup window are implemented for OTLP gRPC. HTTP lookup /
+commit and dedup observability remain open.
+
 **Goal.** Safely consume optional Wisp delivery metadata without excluding
 standard OTLP clients.
 
