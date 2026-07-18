@@ -40,6 +40,18 @@ func newDedupWindow(max int, ttl time.Duration) *dedupWindow {
 }
 
 func (d *dedupWindow) check(tenant, signal, id string, payload []byte) dedupResult {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.checkLocked(tenant, signal, id, payload, true)
+}
+
+func (d *dedupWindow) lookup(tenant, signal, id string, payload []byte) dedupResult {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.checkLocked(tenant, signal, id, payload, false)
+}
+
+func (d *dedupWindow) checkLocked(tenant, signal, id string, payload []byte, remember bool) dedupResult {
 	if id == "" {
 		return dedupNew
 	}
@@ -58,6 +70,9 @@ func (d *dedupWindow) check(tenant, signal, id string, payload []byte) dedupResu
 			return dedupHit
 		}
 		return dedupConflict
+	}
+	if !remember {
+		return dedupNew
 	}
 	if len(d.items) >= d.max {
 		for k := range d.items {

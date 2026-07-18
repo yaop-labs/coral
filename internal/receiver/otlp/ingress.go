@@ -233,7 +233,21 @@ func (s *Server) dedupGRPC(ctx context.Context, signal string, payload proto.Mes
 		return dedupNew, err
 	}
 	principal, _ := bearer.PrincipalFromContext(ctx)
-	return s.dedup.check(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload)), nil
+	return s.dedup.lookup(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload)), nil
+}
+
+func (s *Server) rememberGRPC(ctx context.Context, signal string, payload proto.Message) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	id := firstMetadata(md, "x-wisp-envelope-id")
+	if id == "" {
+		return
+	}
+	identity, err := parseWispHeaders(id, signal)
+	if err != nil {
+		return
+	}
+	principal, _ := bearer.PrincipalFromContext(ctx)
+	s.dedup.remember(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload))
 }
 
 func mustMarshal(m proto.Message) []byte { b, _ := proto.Marshal(m); return b }
@@ -563,12 +577,20 @@ type grpcTraceService struct {
 
 func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
 	g.s.requests.Add(1)
+	if result, err := g.s.dedupGRPC(ctx, "traces", req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	} else if result == dedupHit {
+		return &coltracepb.ExportTraceServiceResponse{}, nil
+	} else if result == dedupConflict {
+		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
+	g.s.rememberGRPC(ctx, "traces", req)
 	resp := &coltracepb.ExportTraceServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &coltracepb.ExportTracePartialSuccess{
@@ -585,11 +607,19 @@ type grpcMetricsService struct {
 
 func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	g.s.requests.Add(1)
+	if result, err := g.s.dedupGRPC(ctx, "metrics", req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	} else if result == dedupHit {
+		return &colmetricspb.ExportMetricsServiceResponse{}, nil
+	} else if result == dedupConflict {
+		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
+	g.s.rememberGRPC(ctx, "metrics", req)
 	resp := &colmetricspb.ExportMetricsServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &colmetricspb.ExportMetricsPartialSuccess{
@@ -606,11 +636,19 @@ type grpcLogsService struct {
 
 func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
 	g.s.requests.Add(1)
+	if result, err := g.s.dedupGRPC(ctx, "logs", req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	} else if result == dedupHit {
+		return &collogspb.ExportLogsServiceResponse{}, nil
+	} else if result == dedupConflict {
+		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
+	g.s.rememberGRPC(ctx, "logs", req)
 	resp := &collogspb.ExportLogsServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &collogspb.ExportLogsPartialSuccess{
