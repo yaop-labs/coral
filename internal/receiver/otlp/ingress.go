@@ -37,6 +37,15 @@ import (
 	"github.com/yaop-labs/reef/grpcreef"
 )
 
+var (
+	errTenantQuota       = errors.New("tenant quota exceeded")
+	errTenantConcurrency = errors.New("tenant concurrency quota exceeded")
+)
+
+func admissionOverload(err error) bool {
+	return errors.Is(err, errTenantQuota) || errors.Is(err, errTenantConcurrency)
+}
+
 const defaultMaxRecvBytes = 16 << 20
 
 // Sink holds the per-signal callbacks that hand an accepted batch to its
@@ -716,7 +725,7 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 	}
 	release, allowed := s.acquireTenant(ctx)
 	if !allowed {
-		return 0, "", errors.New("tenant concurrency quota exceeded")
+		return 0, "", errTenantConcurrency
 	}
 	defer release()
 	b := model.Batch{Spans: spans}
@@ -724,7 +733,7 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 		if tenant, ok := TenantFromContext(ctx); ok {
 			s.recordTenant(tenant, false, false, true)
 		}
-		return 0, "", errors.New("tenant quota exceeded")
+		return 0, "", errTenantQuota
 	}
 	if s.sink.TraceAdmit != nil {
 		b, rejected, reason = s.sink.TraceAdmit(b)
@@ -752,7 +761,7 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 	}
 	release, allowed := s.acquireTenant(ctx)
 	if !allowed {
-		return 0, "", errors.New("tenant concurrency quota exceeded")
+		return 0, "", errTenantConcurrency
 	}
 	defer release()
 	b := metric.Batch{ResourceMetrics: rm}
@@ -760,7 +769,7 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 		if tenant, ok := TenantFromContext(ctx); ok {
 			s.recordTenant(tenant, false, false, true)
 		}
-		return 0, "", errors.New("tenant quota exceeded")
+		return 0, "", errTenantQuota
 	}
 	if s.sink.MetricAdmit != nil {
 		b, rejected, reason = s.sink.MetricAdmit(b)
@@ -788,7 +797,7 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 	}
 	release, allowed := s.acquireTenant(ctx)
 	if !allowed {
-		return 0, "", errors.New("tenant concurrency quota exceeded")
+		return 0, "", errTenantConcurrency
 	}
 	defer release()
 	b := logs.Batch{ResourceLogs: rl}
@@ -796,7 +805,7 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 		if tenant, ok := TenantFromContext(ctx); ok {
 			s.recordTenant(tenant, false, false, true)
 		}
-		return 0, "", errors.New("tenant quota exceeded")
+		return 0, "", errTenantQuota
 	}
 	if s.sink.LogAdmit != nil {
 		b, rejected, reason = s.sink.LogAdmit(b)
@@ -836,6 +845,9 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
 		g.s.errs.Add(1)
+		if admissionOverload(err) {
+			return nil, status.Error(codes.ResourceExhausted, err.Error())
+		}
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
 	if err := g.s.appendAdmission(ctx, "traces", mustMarshal(req)); err != nil {
@@ -868,6 +880,9 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
+		if admissionOverload(err) {
+			return nil, status.Error(codes.ResourceExhausted, err.Error())
+		}
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
 	if err := g.s.appendAdmission(ctx, "metrics", mustMarshal(req)); err != nil {
@@ -900,6 +915,9 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {
 		g.s.errs.Add(1)
+		if admissionOverload(err) {
+			return nil, status.Error(codes.ResourceExhausted, err.Error())
+		}
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
 	}
 	if err := g.s.appendAdmission(ctx, "logs", mustMarshal(req)); err != nil {
@@ -951,7 +969,11 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 	rejected, reason, err := s.admitTraces(req.Context(), spans)
 	if err != nil {
 		s.errs.Add(1)
-		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		if admissionOverload(err) {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		} else {
+			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	if err := s.appendAdmission(req.Context(), "traces", body); err != nil {
@@ -1001,7 +1023,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 	rejected, reason, err := s.admitMetrics(req.Context(), pb.GetResourceMetrics())
 	if err != nil {
 		s.errs.Add(1)
-		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		if admissionOverload(err) {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		} else {
+			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	if err := s.appendAdmission(req.Context(), "metrics", body); err != nil {
@@ -1051,7 +1077,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 	rejected, reason, err := s.admitLogs(req.Context(), pb.GetResourceLogs())
 	if err != nil {
 		s.errs.Add(1)
-		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		if admissionOverload(err) {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+		} else {
+			http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	if err := s.appendAdmission(req.Context(), "logs", body); err != nil {
