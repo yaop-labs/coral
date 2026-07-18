@@ -934,7 +934,7 @@ func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline[model.Batch]
 			rules,
 			func(ctx context.Context, b model.Batch) error {
 				return p.ExportFrom(ctx, b, processorIndex+1)
-			},
+			}, cfg.MaxBytes,
 		)
 		a.hooks = append(a.hooks, lifecycleHook{
 			start: func(ctx context.Context) error {

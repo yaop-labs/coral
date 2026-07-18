@@ -64,6 +64,8 @@ func (pt *PendingTrace) add(s model.Span) {
 type TailSampler struct {
 	decisionWait time.Duration
 	maxTraces    int
+	maxBytes     int64
+	currentBytes int64
 	defaultRate  float64
 	rules        []Rule
 	export       func(context.Context, model.Batch) error
@@ -83,7 +85,7 @@ func NewTail(
 	maxTraces int,
 	defaultRate float64,
 	rules []Rule,
-	export func(context.Context, model.Batch) error,
+	export func(context.Context, model.Batch) error, maxBytes ...int64,
 ) *TailSampler {
 	if decisionWait <= 0 {
 		decisionWait = 30 * time.Second
@@ -91,10 +93,15 @@ func NewTail(
 	if maxTraces <= 0 {
 		maxTraces = 100_000
 	}
+	bytes := int64(256 << 20)
+	if len(maxBytes) > 0 && maxBytes[0] > 0 {
+		bytes = maxBytes[0]
+	}
 	cache, _ := lru.New[model.TraceID, decision](maxTraces * 2)
 	return &TailSampler{
 		decisionWait: decisionWait,
 		maxTraces:    maxTraces,
+		maxBytes:     bytes,
 		defaultRate:  defaultRate,
 		rules:        rules,
 		export:       export,
@@ -134,6 +141,14 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 			ts.pending[s.TraceID] = pt
 		}
 		pt.add(s)
+		ts.currentBytes += int64(s.SizeBytes())
+		for ts.currentBytes > ts.maxBytes {
+			if evicted := ts.evictOldestLocked(); evicted != nil {
+				ts.currentBytes -= pendingBytes(evicted)
+			} else {
+				break
+			}
+		}
 	}
 	ts.mu.Unlock()
 
@@ -157,6 +172,14 @@ func (ts *TailSampler) evictOldestLocked() *PendingTrace {
 	}
 	delete(ts.pending, oldestID)
 	return oldest
+}
+
+func pendingBytes(pt *PendingTrace) int64 {
+	var n int64
+	for _, s := range pt.Spans {
+		n += int64(s.SizeBytes())
+	}
+	return n
 }
 
 // Start launches the background tick loop that ages out pending traces.

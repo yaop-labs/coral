@@ -203,6 +203,7 @@ type SamplingRule struct {
 type TailSamplingConfig struct {
 	DecisionWait    Duration       `yaml:"decision_wait"`
 	MaxTraces       int            `yaml:"max_traces"`
+	MaxBytes        int64          `yaml:"max_bytes"`
 	DefaultKeepRate float64        `yaml:"default_keep_rate"`
 	Rules           []SamplingRule `yaml:"rules"`
 }
