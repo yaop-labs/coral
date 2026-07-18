@@ -48,6 +48,7 @@ type Pipeline[T Signal] struct {
 	wg             sync.WaitGroup
 	exporterWG     sync.WaitGroup
 	exporterLanes  []chan T
+	exporterBytes  []atomic.Int64
 	stateMu        sync.Mutex
 	shutdownOnce   sync.Once
 	shutdownDone   chan struct{}
@@ -163,6 +164,7 @@ func (p *Pipeline[T]) Start(ctx context.Context) error {
 
 	for range p.exporters {
 		p.exporterLanes = append(p.exporterLanes, make(chan T, p.cfg.QueueSize))
+		p.exporterBytes = append(p.exporterBytes, atomic.Int64{})
 	}
 	for i, e := range p.exporters {
 		lane := p.exporterLanes[i]
@@ -170,6 +172,7 @@ func (p *Pipeline[T]) Start(ctx context.Context) error {
 		go func() {
 			defer p.exporterWG.Done()
 			for b := range lane {
+				p.exporterBytes[i].Add(-signalBytes(b))
 				if err := e.Export(p.workCtx, b); err != nil {
 					p.exporterFailures.Add(1)
 					p.logger.Error("exporter error", "err", err)
@@ -464,11 +467,17 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 		// destination can fill and drop its own lane, but cannot delay or block
 		// delivery to the other fan-out destinations.
 		for i, lane := range p.exporterLanes {
+			bytes := signalBytes(b)
+			if !p.reserveLaneBytes(i, bytes) {
+				p.exporterDrops.Add(1)
+				continue
+			}
 			select {
 			case lane <- b:
 				p.batchesDispatched.Add(1)
 				p.itemsDispatched.Add(uint64(b.Len()))
 			default:
+				p.exporterBytes[i].Add(-bytes)
 				p.exporterDrops.Add(1)
 				p.logger.Error("exporter queue full; batch dropped", "exporter", i)
 			}
@@ -492,6 +501,18 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+func (p *Pipeline[T]) reserveLaneBytes(i int, n int64) bool {
+	for {
+		cur := p.exporterBytes[i].Load()
+		if cur+n > p.cfg.QueueBytes {
+			return false
+		}
+		if p.exporterBytes[i].CompareAndSwap(cur, cur+n) {
+			return true
+		}
+	}
 }
 
 // Stats returns pipeline counters for observability: batches enqueued, batches
@@ -563,6 +584,17 @@ func (p *Pipeline[T]) DrainStats() DrainSnapshot {
 // Channel len/cap are safe concurrent snapshots and do not block producers.
 func (p *Pipeline[T]) QueueDepth() (depth, capacity int) {
 	return len(p.in), cap(p.in)
+}
+
+// ExporterLaneDepth returns bounded queue depth/capacity and bytes for a
+// destination index. Destination indices are stable within one configuration.
+func (p *Pipeline[T]) ExporterLaneDepth(index int) (depth, capacity int, bytes, byteCapacity int64) {
+	p.exportMu.RLock()
+	defer p.exportMu.RUnlock()
+	if index < 0 || index >= len(p.exporterLanes) {
+		return 0, 0, 0, p.cfg.QueueBytes
+	}
+	return len(p.exporterLanes[index]), cap(p.exporterLanes[index]), p.exporterBytes[index].Load(), p.cfg.QueueBytes
 }
 
 // ExporterDrops returns batches dropped from an individual exporter lane
