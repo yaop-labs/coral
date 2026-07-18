@@ -119,6 +119,25 @@ func TestJournalFsyncFailureIsNotSuccess(t *testing.T) {
 	_ = j.Close()
 }
 
+func TestJournalCompactFsyncFailure(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = j.Append([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	j.syncFn = func() error { return os.ErrPermission }
+	if err = j.Compact(); err == nil {
+		t.Fatal("compact succeeded despite fsync failure")
+	}
+	bytes, _ := j.Stats()
+	if bytes == 0 {
+		t.Fatal("compact erased records before fsync")
+	}
+	_ = j.Close()
+}
+
 func TestJournalRejectsCorruptionAndFull(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "j.log")
 	j, err := Open(p, 16)
