@@ -106,3 +106,28 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		t.Fatalf("got %#v", got)
 	}
 }
+
+func TestEnvelopeJournalRecovery(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "j.log")
+	j, err := Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Envelope{Signal: "logs", Tenant: "org/project", Payload: []byte("otlp")}
+	if err = j.Append(EncodeEnvelope(want)); err != nil {
+		t.Fatal(err)
+	}
+	_ = j.Close()
+	j, err = Open(p, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var got Envelope
+	if err = j.Recover(func(raw []byte) error { got, err = DecodeEnvelope(raw); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if got.Signal != want.Signal || got.Tenant != want.Tenant || string(got.Payload) != "otlp" {
+		t.Fatalf("got %#v", got)
+	}
+}
