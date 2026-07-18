@@ -21,12 +21,12 @@ func toTraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
 	var order []string
 	for i := range b.Spans {
 		s := &b.Spans[i]
-		key := resourceKey(s.Resource)
+		key := resourceKey(s.Resource) + "\x00" + s.ScopeName + "\x00" + s.ScopeVersion + "\x00" + s.SchemaURL
 		rs := groups[key]
 		if rs == nil {
 			rs = &tracepb.ResourceSpans{
 				Resource:   &resourcepb.Resource{Attributes: kvFromAttrs(s.Resource.Attrs)},
-				ScopeSpans: []*tracepb.ScopeSpans{{Scope: &commonpb.InstrumentationScope{Name: scopeName}}},
+				ScopeSpans: []*tracepb.ScopeSpans{{Scope: &commonpb.InstrumentationScope{Name: firstNonEmpty(s.ScopeName, scopeName), Version: s.ScopeVersion}, SchemaUrl: s.SchemaURL}},
 			}
 			groups[key] = rs
 			order = append(order, key)
@@ -38,6 +38,13 @@ func toTraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
 		req.ResourceSpans = append(req.ResourceSpans, groups[key])
 	}
 	return req
+}
+
+func firstNonEmpty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func spanToProto(s *model.Span) *tracepb.Span {
