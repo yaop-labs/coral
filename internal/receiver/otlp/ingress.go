@@ -3,6 +3,7 @@ package otlp
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -112,6 +113,7 @@ type Server struct {
 	sink         Sink
 	tenantMap    map[string]string
 	tenantLimits map[string]TenantLimit
+	dedup        *dedupWindow
 	grpcSecurity edge.ServerConfig
 	httpSecurity edge.ServerConfig
 
@@ -191,6 +193,7 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		sink:         sink,
 		tenantMap:    security.TenantMap,
 		tenantLimits: security.TenantLimits,
+		dedup:        newDedupWindow(100000, 15*time.Minute),
 		grpcSecurity: security.GRPC,
 		httpSecurity: security.HTTP,
 		ready:        make(chan struct{}),
@@ -218,6 +221,22 @@ func firstMetadata(md metadata.MD, key string) string {
 	}
 	return v[0]
 }
+
+func (s *Server) dedupGRPC(ctx context.Context, signal string, payload proto.Message) (dedupResult, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	id := firstMetadata(md, "x-wisp-envelope-id")
+	if id == "" {
+		return dedupNew, nil
+	}
+	identity, err := parseWispHeaders(id, signal)
+	if err != nil {
+		return dedupNew, err
+	}
+	principal, _ := bearer.PrincipalFromContext(ctx)
+	return s.dedup.check(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload)), nil
+}
+
+func mustMarshal(m proto.Message) []byte { b, _ := proto.Marshal(m); return b }
 
 func validateWispHTTP(w http.ResponseWriter, req *http.Request) bool {
 	if _, err := parseWispHeaders(req.Header.Get("x-wisp-envelope-id"), req.Header.Get("x-wisp-signal-kind")); err != nil {
@@ -544,6 +563,13 @@ type grpcTraceService struct {
 
 func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTraceServiceRequest) (*coltracepb.ExportTraceServiceResponse, error) {
 	g.s.requests.Add(1)
+	if result, err := g.s.dedupGRPC(ctx, "traces", req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	} else if result == dedupHit {
+		return &coltracepb.ExportTraceServiceResponse{}, nil
+	} else if result == dedupConflict {
+		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
@@ -566,6 +592,13 @@ type grpcMetricsService struct {
 
 func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
 	g.s.requests.Add(1)
+	if result, err := g.s.dedupGRPC(ctx, "metrics", req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	} else if result == dedupHit {
+		return &colmetricspb.ExportMetricsServiceResponse{}, nil
+	} else if result == dedupConflict {
+		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
@@ -587,6 +620,13 @@ type grpcLogsService struct {
 
 func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsServiceRequest) (*collogspb.ExportLogsServiceResponse, error) {
 	g.s.requests.Add(1)
+	if result, err := g.s.dedupGRPC(ctx, "logs", req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	} else if result == dedupHit {
+		return &collogspb.ExportLogsServiceResponse{}, nil
+	} else if result == dedupConflict {
+		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
+	}
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {
 		g.s.errs.Add(1)
