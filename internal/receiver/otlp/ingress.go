@@ -693,14 +693,14 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	if err := g.s.appendAdmission(ctx, "traces", mustMarshal(req)); err != nil {
-		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
-	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
 	rejected, reason, err := g.s.admitTraces(ctx, spans)
 	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
+	}
+	if err := g.s.appendAdmission(ctx, "traces", mustMarshal(req)); err != nil {
+		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	g.s.rememberGRPC(ctx, "traces", req)
 	resp := &coltracepb.ExportTraceServiceResponse{}
@@ -726,13 +726,13 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	if err := g.s.appendAdmission(ctx, "metrics", mustMarshal(req)); err != nil {
-		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
-	}
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
 	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
+	}
+	if err := g.s.appendAdmission(ctx, "metrics", mustMarshal(req)); err != nil {
+		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	g.s.rememberGRPC(ctx, "metrics", req)
 	resp := &colmetricspb.ExportMetricsServiceResponse{}
@@ -758,13 +758,13 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	if err := g.s.appendAdmission(ctx, "logs", mustMarshal(req)); err != nil {
-		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
-	}
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
 	if err != nil {
 		g.s.errs.Add(1)
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
+	}
+	if err := g.s.appendAdmission(ctx, "logs", mustMarshal(req)); err != nil {
+		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	g.s.rememberGRPC(ctx, "logs", req)
 	resp := &collogspb.ExportLogsServiceResponse{}
