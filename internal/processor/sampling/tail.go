@@ -207,6 +207,7 @@ func (ts *TailSampler) tickAt(ctx context.Context, now time.Time) {
 		if age >= ts.decisionWait {
 			ready = append(ready, pt)
 			delete(ts.pending, id)
+			ts.currentBytes -= pendingBytes(pt)
 		}
 	}
 	ts.mu.Unlock()
