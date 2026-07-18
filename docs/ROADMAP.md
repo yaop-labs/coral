@@ -292,6 +292,9 @@ Multi-tenant activation is opt-in until migration is complete.
 
 ## Increment 6 — Wisp delivery identity and bounded deduplication
 
+Status: completed (implementation and compatibility coverage landed; no
+release tag yet).
+
 Implementation progress: optional header validation and a bounded two-phase
 tenant/signal-aware dedup window are implemented for OTLP gRPC and HTTP.
 Bounded hit/miss/conflict/eviction counters, TTL expiry, capacity eviction,
@@ -336,7 +339,8 @@ headers; tenant/signal separation; same/different payload replay; TTL/capacity
 tests; concurrent replay race tests.
 
 **Done when.** All stated replay/conflict cases are deterministic and bounded,
-and Wisp v0.8.x compatibility is verified without changing Wisp.
+and Wisp v0.8.x compatibility is verified without changing Wisp. Achieved by
+the current implementation and parser/fuzz/race/integration coverage.
 
 **Compatibility.** Additive for clients without headers. Present invalid
 headers begin failing deliberately; release notes call this out.
