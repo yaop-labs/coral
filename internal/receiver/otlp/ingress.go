@@ -335,6 +335,19 @@ func (s *Server) ReplayAdmission(fn func([]byte) error) error {
 	return s.journal.Replay(fn)
 }
 
+func (s *Server) ReplayRouted(fn func(journal.Envelope) error) error {
+	if s.journal == nil {
+		return nil
+	}
+	return s.journal.Recover(func(payload []byte) error {
+		env, err := journal.DecodeEnvelope(payload)
+		if err != nil {
+			return err
+		}
+		return fn(env)
+	})
+}
+
 func (s *Server) JournalStats() (bytes, maxBytes int64) {
 	if s.journal == nil {
 		return 0, 0
