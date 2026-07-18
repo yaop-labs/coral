@@ -139,6 +139,8 @@ type Server struct {
 	tracesRejected atomic.Uint64
 	pointsRejected atomic.Uint64
 	logsRejected   atomic.Uint64
+	dedupHits      atomic.Uint64
+	dedupConflicts atomic.Uint64
 }
 
 // NewServer builds an ingress bound to grpcAddr and/or httpAddr (either may be
@@ -233,7 +235,14 @@ func (s *Server) dedupGRPC(ctx context.Context, signal string, payload proto.Mes
 		return dedupNew, err
 	}
 	principal, _ := bearer.PrincipalFromContext(ctx)
-	return s.dedup.lookup(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload)), nil
+	result := s.dedup.lookup(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload))
+	if result == dedupHit {
+		s.dedupHits.Add(1)
+	}
+	if result == dedupConflict {
+		s.dedupConflicts.Add(1)
+	}
+	return result, nil
 }
 
 func (s *Server) rememberGRPC(ctx context.Context, signal string, payload proto.Message) {
@@ -271,7 +280,14 @@ func (s *Server) dedupHTTP(req *http.Request, signal string, body []byte) (dedup
 	}
 	principal, _ := bearer.PrincipalFromContext(req.Context())
 	key := hex.EncodeToString(identity.EnvelopeID[:])
-	return s.dedup.lookup(principal, signal, key, body), key, nil
+	result := s.dedup.lookup(principal, signal, key, body)
+	if result == dedupHit {
+		s.dedupHits.Add(1)
+	}
+	if result == dedupConflict {
+		s.dedupConflicts.Add(1)
+	}
+	return result, key, nil
 }
 
 func (s *Server) rememberHTTP(req *http.Request, signal, key string, body []byte) {
@@ -503,6 +519,10 @@ func (s *Server) HTTPAddr() string {
 func (s *Server) Stats() (requests, errs, traces, points, logs uint64) {
 	return s.requests.Load(), s.errs.Load(),
 		s.tracesAccepted.Load(), s.pointsAccepted.Load(), s.logsAccepted.Load()
+}
+
+func (s *Server) DedupStats() (hits, conflicts uint64) {
+	return s.dedupHits.Load(), s.dedupConflicts.Load()
 }
 
 // Rejected reports records refused at accept time and reported via
