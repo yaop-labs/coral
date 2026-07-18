@@ -335,15 +335,18 @@ headers begin failing deliberately; release notes call this out.
 
 ## Increment 7 — durable admission journal
 
+Status: completed (implementation and failure-injection coverage landed; no
+release tag yet).
+
 Implementation progress: bounded CRC-protected fsync journal, gRPC/HTTP append
 before acknowledgement, explicit replay API, lifecycle close, and pressure
 snapshot are implemented. Replay worker, compaction/age TTL, and crash-injected
 end-to-end recovery remain open before marking this increment complete.
 
 Replay worker, post-success compaction, and age-based TTL compaction are now
-wired and tested; process-level append-crash recovery is now covered. Remaining
-depth is fault injection at fsync/compact boundaries and long-run capacity
-validation before a release tag.
+wired and tested; process-level append-crash recovery, fsync/compact failure
+injection, and repeated-append capacity validation are covered. Release/tag
+decision remains separate from capability completion.
 
 Records written before routed envelopes are replayable only through the legacy
 opaque `ReplayAdmission` callback. `ReplayRouted` rejects those records rather
