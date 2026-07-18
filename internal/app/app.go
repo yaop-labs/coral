@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -831,6 +832,22 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_points counter\ncoral_otlp_rejected_points %d\n", rejPoints)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_records counter\ncoral_otlp_rejected_records %d\n", rejRecords)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_log_limit_rejected counter\ncoral_otlp_log_limit_rejected %d\n", logLimitRejected)
+			tenantStats := a.ingress.TenantStats()
+			tenantNames := make([]string, 0, len(tenantStats))
+			for tenant := range tenantStats {
+				tenantNames = append(tenantNames, tenant)
+			}
+			sort.Strings(tenantNames)
+			_, _ = fmt.Fprintln(w, "# TYPE coral_otlp_tenant_accepted counter")
+			_, _ = fmt.Fprintln(w, "# TYPE coral_otlp_tenant_rejected counter")
+			_, _ = fmt.Fprintln(w, "# TYPE coral_otlp_tenant_quota_rejected counter")
+			for _, tenant := range tenantNames {
+				c := tenantStats[tenant]
+				label := prometheusLabelValue(tenant)
+				_, _ = fmt.Fprintf(w, "coral_otlp_tenant_accepted{tenant=%q} %d\n", label, c.Accepted)
+				_, _ = fmt.Fprintf(w, "coral_otlp_tenant_rejected{tenant=%q} %d\n", label, c.Rejected)
+				_, _ = fmt.Fprintf(w, "coral_otlp_tenant_quota_rejected{tenant=%q} %d\n", label, c.QuotaRejected)
+			}
 		}
 		a.credentialObs.writePrometheus(w)
 	})

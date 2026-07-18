@@ -43,6 +43,8 @@ tested, documented increment.
   attribute-key cardinality across each log request.
 - Added `coral_otlp_log_limit_rejected` self-observability counter, separate
   from partial-success record rejects and quota overload.
+- Exported bounded configured-tenant accepted/rejected/quota-rejected counters
+  from `/metrics` with deterministic ordering and escaped labels.
 - Reconciled Increment 9 progress: bounded log admission is implemented;
   per-record partial-success aggregation and downstream retrieval remain open.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
