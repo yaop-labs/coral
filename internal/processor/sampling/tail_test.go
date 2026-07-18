@@ -310,9 +310,12 @@ func TestTailSampler_CloseReleasesByteAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
 	if ts.currentBytes != 0 || len(ts.pending) != 0 {
 		t.Fatalf("close state bytes=%d pending=%d", ts.currentBytes, len(ts.pending))
+	}
+	ts.mu.Unlock()
+	if err := ts.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

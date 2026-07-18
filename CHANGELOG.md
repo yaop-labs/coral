@@ -67,6 +67,7 @@ tested, documented increment.
   horizon, preventing stale pending-byte pressure after normal flush.
 - Fixed shutdown flush accounting so tail sampler close leaves no stale pending
   bytes or trace entries.
+- Made tail sampler `Close` idempotent for repeated lifecycle shutdown calls.
 - Added Amber exporter coverage proving cumulative Sum temporality and
   monotonicity are preserved without implicit conversion.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag

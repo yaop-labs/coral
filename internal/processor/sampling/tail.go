@@ -75,9 +75,10 @@ type TailSampler struct {
 
 	decided *lru.Cache[model.TraceID, decision]
 
-	ticker *time.Ticker
-	done   chan struct{}
-	now    func() time.Time
+	ticker    *time.Ticker
+	done      chan struct{}
+	now       func() time.Time
+	closeOnce sync.Once
 }
 
 func NewTail(
@@ -236,23 +237,23 @@ func (ts *TailSampler) decide(pt *PendingTrace) decision {
 
 // Close stops the tick loop and flushes all buffered traces (force keep).
 func (ts *TailSampler) Close() error {
-	if ts.ticker != nil {
-		ts.ticker.Stop()
-	}
-	close(ts.done)
-
-	ts.mu.Lock()
-	remaining := make([]*PendingTrace, 0, len(ts.pending))
-	for id, pt := range ts.pending {
-		remaining = append(remaining, pt)
-		delete(ts.pending, id)
-	}
-	ts.currentBytes = 0
-	ts.mu.Unlock()
-
-	for _, pt := range remaining {
-		_ = ts.export(context.Background(), model.Batch{Spans: pt.Spans})
-	}
+	ts.closeOnce.Do(func() {
+		if ts.ticker != nil {
+			ts.ticker.Stop()
+		}
+		close(ts.done)
+		ts.mu.Lock()
+		remaining := make([]*PendingTrace, 0, len(ts.pending))
+		for id, pt := range ts.pending {
+			remaining = append(remaining, pt)
+			delete(ts.pending, id)
+		}
+		ts.currentBytes = 0
+		ts.mu.Unlock()
+		for _, pt := range remaining {
+			_ = ts.export(context.Background(), model.Batch{Spans: pt.Spans})
+		}
+	})
 	return nil
 }
 
