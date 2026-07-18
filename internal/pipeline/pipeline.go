@@ -13,8 +13,9 @@ import (
 
 // Config controls pipeline concurrency.
 type Config struct {
-	Workers   int
-	QueueSize int
+	Workers    int
+	QueueSize  int
+	QueueBytes int64
 }
 
 func (c *Config) setDefaults() {
@@ -23,6 +24,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.QueueSize <= 0 {
 		c.QueueSize = 10000
+	}
+	if c.QueueBytes <= 0 {
+		c.QueueBytes = 64 << 20
 	}
 }
 
@@ -64,6 +68,7 @@ type Pipeline[T Signal] struct {
 	enqueueStopped atomic.Bool
 	enqueueMu      sync.Mutex
 	enqueueWG      sync.WaitGroup
+	queuedBytes    atomic.Int64
 	stopEnqueue    chan struct{}
 	exportMu       sync.RWMutex
 
@@ -119,13 +124,20 @@ func (p *Pipeline[T]) Enqueue(ctx context.Context, b T) error {
 	defer p.enqueueWG.Done()
 
 	p.batchesIn.Add(1)
+	bytes := signalBytes(b)
+	if !p.reserveBytes(ctx, bytes) {
+		p.batchesDropped.Add(1)
+		return fmt.Errorf("pipeline queue byte limit exceeded")
+	}
 	select {
 	case p.in <- b:
 		return nil
 	case <-p.stopEnqueue:
+		p.queuedBytes.Add(-bytes)
 		p.batchesDropped.Add(1)
 		return errPipelineStopped
 	case <-ctx.Done():
+		p.queuedBytes.Add(-bytes)
 		p.batchesDropped.Add(1)
 		return ctx.Err()
 	}
@@ -385,8 +397,40 @@ func (p *Pipeline[T]) ExportFrom(ctx context.Context, b T, startIndex int) error
 func (p *Pipeline[T]) worker(ctx context.Context) {
 	defer p.wg.Done()
 	for b := range p.in {
+		p.queuedBytes.Add(-signalBytes(b))
 		if err := p.processFrom(ctx, b, 0); err != nil {
 			p.logger.Error("pipeline processing error", "err", err)
+		}
+	}
+}
+
+const defaultItemBytes = 256
+
+func signalBytes[T Signal](b T) int64 {
+	if sized, ok := any(b).(SizedSignal); ok && sized.SizeBytes() > 0 {
+		return int64(sized.SizeBytes())
+	}
+	return int64(max(b.Len(), 1)) * defaultItemBytes
+}
+
+func (p *Pipeline[T]) reserveBytes(ctx context.Context, n int64) bool {
+	if n > p.cfg.QueueBytes {
+		return false
+	}
+	for {
+		cur := p.queuedBytes.Load()
+		if cur+n > p.cfg.QueueBytes {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-p.stopEnqueue:
+				return false
+			default:
+				return false
+			}
+		}
+		if p.queuedBytes.CompareAndSwap(cur, cur+n) {
+			return true
 		}
 	}
 }

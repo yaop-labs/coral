@@ -257,5 +257,14 @@ type Batch struct {
 	Spans []Span
 }
 
+// SizeBytes returns the bounded in-memory estimate used for queue admission.
+func (b Batch) SizeBytes() int {
+	n := 0
+	for _, s := range b.Spans {
+		n += s.SizeBytes()
+	}
+	return n
+}
+
 // Len reports the number of spans, satisfying pipeline.Signal.
 func (b Batch) Len() int { return len(b.Spans) }

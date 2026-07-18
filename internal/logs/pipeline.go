@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/pipeline"
 )
@@ -27,6 +28,14 @@ func (b Batch) Len() int {
 		for _, sl := range rl.GetScopeLogs() {
 			n += len(sl.GetLogRecords())
 		}
+	}
+	return n
+}
+
+func (b Batch) SizeBytes() int {
+	n := 0
+	for _, rl := range b.ResourceLogs {
+		n += proto.Size(rl)
 	}
 	return n
 }

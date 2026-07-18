@@ -9,6 +9,13 @@ type Signal interface {
 	Len() int
 }
 
+// SizedSignal may provide an exact encoded-size estimate for byte admission.
+// Signals without it use a conservative per-item estimate in the pipeline.
+type SizedSignal interface {
+	Signal
+	SizeBytes() int
+}
+
 // Receiver generates batches and pushes them into the pipeline via emit.
 // Start blocks until ctx is canceled or a fatal error occurs.
 // Stop stops the receiver.

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/pipeline"
 )
@@ -30,6 +31,14 @@ func (b Batch) Len() int {
 				n += metricPoints(m)
 			}
 		}
+	}
+	return n
+}
+
+func (b Batch) SizeBytes() int {
+	n := 0
+	for _, rm := range b.ResourceMetrics {
+		n += proto.Size(rm)
 	}
 	return n
 }
