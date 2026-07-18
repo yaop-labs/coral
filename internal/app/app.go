@@ -750,15 +750,32 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			prometheusLabelValue(state))
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_queue_depth gauge")
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_queue_capacity gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_items_processed_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_batches_dispatched_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_items_dispatched_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_batches_delivered_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_items_delivered_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_processor_failures_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_failures_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_queue_drops_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_in_progress gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_forced gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_duration_seconds gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_outcome gauge")
 		writeQueueMetrics(w, "traces", traceQueueDepth, traceQueueCapacity)
+		writePipelineMetrics(w, "traces", p)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_in counter\ncoral_batches_in %d\n", batchesIn)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_batches_dropped counter\ncoral_batches_dropped %d\n", batchesDropped)
+		// Compatibility metric: "out" historically meant processed through the
+		// processor chain, not confirmed delivery. New consumers should use the
+		// explicitly named coral_pipeline_* metrics above.
 		_, _ = fmt.Fprintf(w, "# TYPE coral_spans_out counter\ncoral_spans_out %d\n", spansOut)
 		_, _ = fmt.Fprintf(w, "# TYPE coral_trace_exporter_batches_dropped counter\ncoral_trace_exporter_batches_dropped %d\n", p.ExporterDrops())
 		if a.metricPipeline != nil {
 			_, _, pointsOut := a.metricPipeline.Stats()
 			depth, capacity := a.metricPipeline.QueueDepth()
 			writeQueueMetrics(w, "metrics", depth, capacity)
+			writePipelineMetrics(w, "metrics", a.metricPipeline)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", pointsOut)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_exporter_batches_dropped counter\ncoral_metric_exporter_batches_dropped %d\n", a.metricPipeline.ExporterDrops())
 		}
@@ -766,6 +783,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _, recordsOut := a.logPipeline.Stats()
 			depth, capacity := a.logPipeline.QueueDepth()
 			writeQueueMetrics(w, "logs", depth, capacity)
+			writePipelineMetrics(w, "logs", a.logPipeline)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_records_out counter\ncoral_log_records_out %d\n", recordsOut)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_exporter_batches_dropped counter\ncoral_log_exporter_batches_dropped %d\n", a.logPipeline.ExporterDrops())
 		}
@@ -792,6 +810,31 @@ func writeQueueMetrics(w http.ResponseWriter, signal string, depth, capacity int
 		signal, depth)
 	_, _ = fmt.Fprintf(w, "coral_pipeline_queue_capacity{signal=%q} %d\n",
 		signal, capacity)
+}
+
+func writePipelineMetrics[T pipeline.Signal](w http.ResponseWriter, signal string, p *pipeline.Pipeline[T]) {
+	delivery := p.DeliveryStats()
+	drain := p.DrainStats()
+	inProgress := 0
+	if drain.InProgress {
+		inProgress = 1
+	}
+	forced := 0
+	if drain.Forced {
+		forced = 1
+	}
+	_, _ = fmt.Fprintf(w, "coral_pipeline_items_processed_total{signal=%q} %d\n", signal, delivery.ItemsProcessed)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_batches_dispatched_total{signal=%q} %d\n", signal, delivery.BatchesDispatched)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_items_dispatched_total{signal=%q} %d\n", signal, delivery.ItemsDispatched)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_batches_delivered_total{signal=%q} %d\n", signal, delivery.BatchesDelivered)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_items_delivered_total{signal=%q} %d\n", signal, delivery.ItemsDelivered)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_processor_failures_total{signal=%q} %d\n", signal, delivery.ProcessorFailures)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_exporter_failures_total{signal=%q} %d\n", signal, delivery.ExporterFailures)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_exporter_queue_drops_total{signal=%q} %d\n", signal, delivery.ExporterDrops)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_in_progress{signal=%q} %d\n", signal, inProgress)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_forced{signal=%q} %d\n", signal, forced)
+	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_duration_seconds{signal=%q} %g\n", signal, drain.Duration.Seconds())
+	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_outcome{signal=%q,outcome=%q} 1\n", signal, drain.Outcome)
 }
 
 func prometheusLabelValue(value string) string {

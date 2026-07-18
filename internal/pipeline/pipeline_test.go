@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,7 +142,7 @@ func TestPipeline_ProcessorFilters(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if exp.Len() == 2 {
+		if p.DeliveryStats().ItemsDelivered == 2 {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -221,7 +222,7 @@ func TestPipeline_Stats(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if exp.Len() == 2 {
+		if p.DeliveryStats().ItemsDelivered == 2 {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -235,7 +236,14 @@ func TestPipeline_Stats(t *testing.T) {
 		t.Errorf("unexpected drops: %d", dropped)
 	}
 	if out != 2 {
-		t.Errorf("spansOut = %d, want 2", out)
+		t.Errorf("itemsProcessed = %d, want 2", out)
+	}
+	delivery := p.DeliveryStats()
+	if delivery.ItemsProcessed != 2 || delivery.ItemsDelivered != 2 {
+		t.Errorf("DeliveryStats() = %+v, want 2 processed and delivered items", delivery)
+	}
+	if delivery.BatchesDispatched != 1 || delivery.BatchesDelivered != 1 {
+		t.Errorf("DeliveryStats() = %+v, want one dispatched and delivered batch", delivery)
 	}
 
 	cancel()
@@ -525,6 +533,139 @@ func TestPipeline_Shutdown_Idempotent(t *testing.T) {
 	}
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Fatalf("second Shutdown: %v", err)
+	}
+	drain := p.DrainStats()
+	if drain.Outcome != "success" || drain.InProgress || drain.Forced {
+		t.Fatalf("DrainStats() = %+v, want completed graceful drain", drain)
+	}
+}
+
+type contextCheckingExporter struct {
+	mu        sync.Mutex
+	delivered int
+}
+
+func (e *contextCheckingExporter) Export(ctx context.Context, b model.Batch) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.delivered += b.Len()
+	e.mu.Unlock()
+	return nil
+}
+
+func (*contextCheckingExporter) Close() error { return nil }
+
+func (e *contextCheckingExporter) Len() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.delivered
+}
+
+func TestPipeline_RunCancellationDoesNotCancelDrain(t *testing.T) {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 32}, slog.Default())
+	exp := &contextCheckingExporter{}
+	p.AddExporter(exp)
+	if err := p.Start(runCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	const batches = 20
+	for i := 0; i < batches; i++ {
+		if err := p.Enqueue(context.Background(), model.Batch{
+			Spans: []model.Span{{Name: "queued-before-signal"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancelRun()
+
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if exp.Len() != batches {
+		t.Fatalf("delivered items = %d, want %d after run-context cancellation", exp.Len(), batches)
+	}
+	if got := p.DeliveryStats().ItemsDelivered; got != batches {
+		t.Fatalf("ItemsDelivered = %d, want %d", got, batches)
+	}
+}
+
+func TestPipeline_ShutdownDeadlineCancelsBlockedExporter(t *testing.T) {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
+	exp := &blockingExporter{started: make(chan struct{}), release: make(chan struct{})}
+	p.AddExporter(exp)
+	if err := p.Start(runCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(context.Background(), model.Batch{
+		Spans: []model.Span{{Name: "blocked"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exp.started:
+	case <-time.After(time.Second):
+		t.Fatal("exporter did not start")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopCancel()
+	started := time.Now()
+	err := p.Shutdown(stopCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown error = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Shutdown exceeded its deadline by too much: %v", elapsed)
+	}
+
+	waitUntil := time.Now().Add(time.Second)
+	for p.DrainStats().InProgress && time.Now().Before(waitUntil) {
+		time.Sleep(time.Millisecond)
+	}
+	drain := p.DrainStats()
+	if drain.Outcome != "deadline" || !drain.Forced {
+		t.Fatalf("DrainStats() = %+v, want forced deadline outcome", drain)
+	}
+	if err := p.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("repeated Shutdown error = %v, want terminal deadline error", err)
+	}
+}
+
+type failingExporter struct{ err error }
+
+func (e *failingExporter) Export(context.Context, model.Batch) error { return e.err }
+func (*failingExporter) Close() error                                { return nil }
+
+func TestPipeline_ShutdownReportsDeliveryFailure(t *testing.T) {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
+	p.AddExporter(&failingExporter{err: errors.New("injected storage failure")})
+	if err := p.Start(runCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(context.Background(), model.Batch{
+		Spans: []model.Span{{Name: "lost"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for p.DeliveryStats().ExporterFailures == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancelRun()
+
+	err := p.Shutdown(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exporter_failures=1") {
+		t.Fatalf("Shutdown error = %v, want delivery failure summary", err)
+	}
+	if got := p.DrainStats().Outcome; got != "failed" {
+		t.Fatalf("drain outcome = %q, want failed", got)
 	}
 }
 
