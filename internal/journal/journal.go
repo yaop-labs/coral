@@ -29,20 +29,28 @@ type Journal struct {
 }
 
 type Envelope struct {
-	Signal, Tenant  string
-	Payload         []byte
-	CreatedUnixNano int64
+	Signal, Tenant, DeliveryID string
+	Payload                    []byte
+	CreatedUnixNano            int64
 }
 
 func EncodeEnvelope(e Envelope) []byte {
-	if len(e.Signal) > 255 || len(e.Tenant) > 255 {
+	if len(e.Signal) > 255 || len(e.Tenant) > 255 || len(e.DeliveryID) > 255 {
 		return nil
 	}
-	b := make([]byte, 0, 16+len(e.Signal)+len(e.Tenant)+len(e.Payload))
-	b = append(b, 2, byte(len(e.Signal)))
+	version := byte(2)
+	if e.DeliveryID != "" {
+		version = 3
+	}
+	b := make([]byte, 0, 18+len(e.Signal)+len(e.Tenant)+len(e.DeliveryID)+len(e.Payload))
+	b = append(b, version, byte(len(e.Signal)))
 	b = append(b, e.Signal...)
 	b = append(b, byte(len(e.Tenant)))
 	b = append(b, e.Tenant...)
+	if version == 3 {
+		b = append(b, byte(len(e.DeliveryID)))
+		b = append(b, e.DeliveryID...)
+	}
 	var ts [8]byte
 	binary.BigEndian.PutUint64(ts[:], uint64(e.CreatedUnixNano))
 	b = append(b, ts[:]...)
@@ -51,7 +59,7 @@ func EncodeEnvelope(e Envelope) []byte {
 }
 
 func DecodeEnvelope(b []byte) (Envelope, error) {
-	if len(b) < 3 || (b[0] != 1 && b[0] != 2) {
+	if len(b) < 3 || (b[0] != 1 && b[0] != 2 && b[0] != 3) {
 		return Envelope{}, fmt.Errorf("unsupported journal envelope")
 	}
 	i := 2
@@ -68,7 +76,19 @@ func DecodeEnvelope(b []byte) (Envelope, error) {
 	}
 	e.Tenant = string(b[i : i+nt])
 	i += nt
-	if b[0] == 2 {
+	if b[0] == 3 {
+		if i+1 > len(b) {
+			return Envelope{}, fmt.Errorf("truncated journal envelope")
+		}
+		nd := int(b[i])
+		i++
+		if i+nd > len(b) {
+			return Envelope{}, fmt.Errorf("truncated journal envelope")
+		}
+		e.DeliveryID = string(b[i : i+nd])
+		i += nd
+	}
+	if b[0] == 2 || b[0] == 3 {
 		if i+8 > len(b) {
 			return Envelope{}, fmt.Errorf("truncated journal envelope")
 		}

@@ -294,8 +294,9 @@ Multi-tenant activation is opt-in until migration is complete.
 
 Implementation progress: optional header validation and a bounded two-phase
 tenant/signal-aware dedup window are implemented for OTLP gRPC and HTTP.
-Bounded hit/conflict counters, TTL expiry, capacity eviction, and race-tested
-lock ownership are covered. Durable persistence of dedup state remains open.
+Bounded hit/conflict counters, TTL expiry, capacity eviction, race-tested lock
+ownership, and durable delivery-identity recovery from journal v3 are covered.
+The v1/v2 journal formats remain readable.
 
 **Goal.** Safely consume optional Wisp delivery metadata without excluding
 standard OTLP clients.

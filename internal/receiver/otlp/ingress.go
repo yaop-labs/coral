@@ -159,6 +159,23 @@ type Server struct {
 	dedupConflicts atomic.Uint64
 }
 
+type deliveryIDContextKey struct{}
+
+func withDeliveryID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, deliveryIDContextKey{}, id)
+}
+
+func deliveryIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(deliveryIDContextKey{}).(string); ok {
+		return id
+	}
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	return firstMetadata(md, "x-wisp-envelope-id")
+}
+
 // NewServer builds an ingress bound to grpcAddr and/or httpAddr (either may be
 // empty to disable that transport). sink selects which signals are served.
 func NewServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink) *Server {
@@ -432,7 +449,7 @@ func (s *Server) appendAdmission(ctx context.Context, signal string, payload []b
 			tenant = mapped
 		}
 	}
-	record := journal.EncodeEnvelope(journal.Envelope{Signal: signal, Tenant: tenant, Payload: payload, CreatedUnixNano: time.Now().UnixNano()})
+	record := journal.EncodeEnvelope(journal.Envelope{Signal: signal, Tenant: tenant, DeliveryID: deliveryIDFromContext(ctx), Payload: payload, CreatedUnixNano: time.Now().UnixNano()})
 	if record == nil {
 		return journal.ErrEnvelopeTooLarge
 	}
@@ -456,6 +473,9 @@ func (s *Server) ReplayRouted(fn func(journal.Envelope) error) error {
 		env, err := journal.DecodeEnvelope(payload)
 		if err != nil {
 			return err
+		}
+		if env.DeliveryID != "" {
+			s.dedup.remember(env.Tenant, env.Signal, env.DeliveryID, env.Payload)
 		}
 		return fn(env)
 	})
@@ -981,7 +1001,7 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := s.appendAdmission(req.Context(), "traces", body); err != nil {
+	if err := s.appendAdmission(withDeliveryID(req.Context(), dedupKey), "traces", body); err != nil {
 		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1035,7 +1055,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := s.appendAdmission(req.Context(), "metrics", body); err != nil {
+	if err := s.appendAdmission(withDeliveryID(req.Context(), dedupKey), "metrics", body); err != nil {
 		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1089,7 +1109,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := s.appendAdmission(req.Context(), "logs", body); err != nil {
+	if err := s.appendAdmission(withDeliveryID(req.Context(), dedupKey), "logs", body); err != nil {
 		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}

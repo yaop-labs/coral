@@ -276,6 +276,17 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEnvelopeDeliveryIDRoundTrip(t *testing.T) {
+	want := Envelope{Signal: "logs", Tenant: "tenant-a", DeliveryID: "0123456789abcdef0123456789abcdef", CreatedUnixNano: 42, Payload: []byte("body")}
+	got, err := DecodeEnvelope(EncodeEnvelope(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeliveryID != want.DeliveryID || got.Signal != want.Signal || got.Tenant != want.Tenant || string(got.Payload) != string(want.Payload) {
+		t.Fatalf("round trip = %+v", got)
+	}
+}
+
 func TestEncodeEnvelopeRejectsOversizedRoutingFields(t *testing.T) {
 	if got := EncodeEnvelope(Envelope{Signal: string(make([]byte, 256))}); got != nil {
 		t.Fatal("oversized signal encoded")

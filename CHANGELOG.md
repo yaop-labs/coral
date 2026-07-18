@@ -27,6 +27,8 @@ tested, documented increment.
   window.
 - Corrected roadmap status to reflect the implemented HTTP dedup lookup/commit
   path and bounded hit/conflict observability.
+- Added backward-compatible journal v3 delivery identity fields and replay
+  restoration into the bounded Wisp dedup window for gRPC and HTTP admissions.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and
