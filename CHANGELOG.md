@@ -37,6 +37,8 @@ tested, documented increment.
 - Added bounded dedup miss and capacity-eviction counters to the server stats.
 - Added configurable per-tenant `max_log_record_bytes`; oversized records are
   rejected before sink/journal with permanent `InvalidArgument`/`400` semantics.
+- Added configurable per-tenant `max_log_attributes` for resource, scope, and
+  record attributes, with the same fail-before-acknowledgement semantics.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 

@@ -52,6 +52,9 @@ func TestTenantLimitBounds(t *testing.T) {
 	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_log_record_bytes: 67108865\n")); err == nil {
 		t.Fatal("accepted excessive log record limit")
 	}
+	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_log_attributes: 100001\n")); err == nil {
+		t.Fatal("accepted excessive log attribute limit")
+	}
 }
 
 func validConfig() Config {

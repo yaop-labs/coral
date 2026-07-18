@@ -202,6 +202,7 @@ type TenantLimit struct {
 	MaxConcurrent        int
 	MaxRequestsPerSecond int
 	MaxLogRecordBytes    int
+	MaxLogAttributes     int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -838,11 +839,29 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 	defer release()
 	b := logs.Batch{ResourceLogs: rl}
 	if tenant, ok := TenantFromContext(ctx); ok {
-		if limit := s.tenantLimits[tenant].MaxLogRecordBytes; limit > 0 {
+		limits := s.tenantLimits[tenant]
+		if limit := limits.MaxLogRecordBytes; limit > 0 {
 			for _, resource := range rl {
 				for _, scope := range resource.GetScopeLogs() {
 					for _, record := range scope.GetLogRecords() {
 						if proto.Size(record) > limit {
+							return 0, "", errLogRecordTooLarge
+						}
+					}
+				}
+			}
+		}
+		if limit := limits.MaxLogAttributes; limit > 0 {
+			for _, resource := range rl {
+				if len(resource.GetResource().GetAttributes()) > limit {
+					return 0, "", errLogRecordTooLarge
+				}
+				for _, scope := range resource.GetScopeLogs() {
+					if len(scope.GetScope().GetAttributes()) > limit {
+						return 0, "", errLogRecordTooLarge
+					}
+					for _, record := range scope.GetLogRecords() {
+						if len(record.GetAttributes()) > limit {
 							return 0, "", errLogRecordTooLarge
 						}
 					}
