@@ -98,6 +98,9 @@ func TestApp_SelfObsMux(t *testing.T) {
 		`coral_readiness_state{state="ready"} 1`,
 		`coral_pipeline_queue_depth{signal="traces"}`,
 		`coral_pipeline_queue_capacity{signal="traces"} 64`,
+		`coral_pipeline_items_processed_total{signal="traces"}`,
+		`coral_pipeline_items_delivered_total{signal="traces"}`,
+		`coral_pipeline_drain_outcome{signal="traces",outcome="not_started"} 1`,
 		`coral_credential_events_total{kind="server_leaf",outcome="success"} 0`,
 	} {
 		if !strings.Contains(body, metric) {
