@@ -38,6 +38,22 @@ setting a value is an operator-controlled tightening policy. Log limit
 violations are permanent (`InvalidArgument`/`400`) and are never appended to the
 durable journal.
 
+Example:
+
+```yaml
+tenant_map:
+  wisp-project-a: project-a
+tenant_limits:
+  project-a:
+    max_items: 10000
+    max_bytes: 67108864
+    max_concurrent: 32
+    max_requests_per_second: 200
+    max_log_record_bytes: 1048576
+    max_log_attributes: 128
+    max_log_attribute_keys: 4096
+```
+
 ## Security
 
 Reef v0.3 protects OTLP gRPC/HTTP, self-observability, and HTTP exporter edges
