@@ -237,6 +237,15 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodeEnvelopeRejectsOversizedRoutingFields(t *testing.T) {
+	if got := EncodeEnvelope(Envelope{Signal: string(make([]byte, 256))}); got != nil {
+		t.Fatal("oversized signal encoded")
+	}
+	if got := EncodeEnvelope(Envelope{Tenant: string(make([]byte, 256))}); got != nil {
+		t.Fatal("oversized tenant encoded")
+	}
+}
+
 func TestEnvelopeJournalRecovery(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "j.log")
 	j, err := Open(p, 1024)

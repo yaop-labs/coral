@@ -14,6 +14,7 @@ import (
 )
 
 var ErrFull = errors.New("journal byte limit exceeded")
+var ErrEnvelopeTooLarge = errors.New("journal envelope field too large")
 
 type Journal struct {
 	mu       sync.Mutex
@@ -31,6 +32,9 @@ type Envelope struct {
 }
 
 func EncodeEnvelope(e Envelope) []byte {
+	if len(e.Signal) > 255 || len(e.Tenant) > 255 {
+		return nil
+	}
 	b := make([]byte, 0, 16+len(e.Signal)+len(e.Tenant)+len(e.Payload))
 	b = append(b, 2, byte(len(e.Signal)))
 	b = append(b, e.Signal...)
