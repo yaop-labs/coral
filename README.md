@@ -16,17 +16,27 @@ component contract; Reef remains the transport-security owner.
 
 ## Delivery semantics
 
-Delivery is **at-most-once within coral**: there is no spool, so batches are
-dropped on backpressure or shutdown rather than persisted. Wisp's spool and
-Amber's WAL are durable at their own boundaries, but they do not close Coral's
-current acknowledgement gap: Coral acknowledges after memory enqueue and can
-lose that accepted batch on crash. Do not treat the current path as end-to-end
-durable. Partially-invalid payloads are answered `200 + partial_success` so
+Delivery without `journal_path` is **at-most-once within Coral**: batches are
+dropped on backpressure or shutdown rather than persisted. When the bounded
+`journal_path` is configured, admission is fsync-backed and restart replay is
+at-least-once within the documented journal/dedup boundaries. Wisp's spool and
+Amber's WAL remain durable at their own boundaries. Partially-invalid payloads
+are answered `200 + partial_success` so
 senders do not retry rejected records (contract §4).
 
 Fan-out destinations have independent bounded queues. A slow or retrying
 destination can drop from its own queue, but cannot delay delivery to the other
 exporters.
+
+### Tenant admission limits
+
+`tenant_limits` are keyed by the authenticated Reef principal→tenant mapping.
+Supported bounded controls are `max_items`, `max_bytes`, `max_concurrent`,
+`max_requests_per_second`, `max_log_record_bytes`, `max_log_attributes`, and
+`max_log_attribute_keys`. Defaults are unlimited within global safety bounds;
+setting a value is an operator-controlled tightening policy. Log limit
+violations are permanent (`InvalidArgument`/`400`) and are never appended to the
+durable journal.
 
 ## Security
 
