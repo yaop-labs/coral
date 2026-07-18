@@ -521,7 +521,8 @@ is versioned, configured, and observable. Query APIs remain outside Coral.
 schemas and migrations.
 
 **Security model.** Tenant-derived routing, label-based tenant spoof prevention,
-and bounded series creation.
+bounded series creation, and explicit redaction of resource/scope/datapoint and
+exemplar attributes.
 
 **Failure semantics.** Invalid points use partial success; overload is
 retryable; no silent temporality conversion or exemplar loss.
