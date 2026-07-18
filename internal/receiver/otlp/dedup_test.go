@@ -24,6 +24,13 @@ func TestDedupWindowTenantSignalAndConflict(t *testing.T) {
 	}
 }
 
+func TestDedupWindowDefaultsAreBounded(t *testing.T) {
+	d := newDedupWindow(0, 0)
+	if d.max != 100000 || d.ttl != 15*time.Minute {
+		t.Fatalf("defaults = max %d ttl %s", d.max, d.ttl)
+	}
+}
+
 func TestDedupWindowTTLAndBoundedEviction(t *testing.T) {
 	now := time.Unix(100, 0)
 	d := newDedupWindow(2, time.Second)

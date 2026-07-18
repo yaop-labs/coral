@@ -32,6 +32,8 @@ tested, documented increment.
 - Added an end-to-end replay regression test proving restored delivery IDs
   produce dedup hits before new admission.
 - Added fuzz coverage for malformed Wisp envelope and signal headers.
+- Documented the implemented 15-minute/100,000-entry dedup boundary instead of
+  the stale 24-hour proposal.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and

@@ -308,9 +308,10 @@ canonical payload digest. Key dedup by organisation, project, signal, and
 envelope ID. Use a time- and capacity-bounded window.
 
 **Public contracts.** Headers remain optional and are not authentication. The
-proposed default TTL is 24 hours, configurable within safe limits. Same key and
-digest is an idempotent success; same key and another digest is a permanent
-conflict. Clients without headers use normal admission with no dedup guarantee.
+default TTL is 15 minutes and the capacity is 100,000 entries; both are bounded
+implementation policy. Same key and digest is an idempotent success; same key
+and another digest is a permanent conflict. Clients without headers use normal
+admission with no dedup guarantee.
 
 **Storage/migrations.** Start with a versioned dedup record schema suitable for
 the following durable-journal increment. TTL/capacity changes require no
