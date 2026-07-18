@@ -108,18 +108,19 @@ func quotaExceeded(ctx context.Context, limits map[string]TenantLimit, items int
 // (contract §2). It replaces the former per-signal receivers so a stock OTel
 // SDK — which sends every signal to a single endpoint — just works.
 type Server struct {
-	grpcAddr      string
-	httpAddr      string
-	maxRecv       int
-	sink          Sink
-	tenantMap     map[string]string
-	tenantLimits  map[string]TenantLimit
-	tenantStatsMu sync.Mutex
-	tenantStats   map[string]TenantCounters
-	dedup         *dedupWindow
-	journal       *journal.Journal
-	grpcSecurity  edge.ServerConfig
-	httpSecurity  edge.ServerConfig
+	grpcAddr       string
+	httpAddr       string
+	maxRecv        int
+	sink           Sink
+	tenantMap      map[string]string
+	tenantLimits   map[string]TenantLimit
+	tenantStatsMu  sync.Mutex
+	tenantStats    map[string]TenantCounters
+	tenantInFlight map[string]int
+	dedup          *dedupWindow
+	journal        *journal.Journal
+	grpcSecurity   edge.ServerConfig
+	httpSecurity   edge.ServerConfig
 
 	grpcSrv       *grpc.Server
 	httpSrv       *http.Server
@@ -164,8 +165,9 @@ type SecurityConfig struct {
 }
 
 type TenantLimit struct {
-	MaxItems int
-	MaxBytes int64
+	MaxItems      int
+	MaxBytes      int64
+	MaxConcurrent int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -196,6 +198,25 @@ func (s *Server) recordTenant(tenant string, accepted, rejected, quota bool) {
 		c.QuotaRejected++
 	}
 	s.tenantStats[tenant] = c
+}
+
+func (s *Server) acquireTenant(ctx context.Context) (func(), bool) {
+	tenant, ok := TenantFromContext(ctx)
+	if !ok {
+		return func() {}, true
+	}
+	limit := s.tenantLimits[tenant].MaxConcurrent
+	if limit <= 0 {
+		return func() {}, true
+	}
+	s.tenantStatsMu.Lock()
+	defer s.tenantStatsMu.Unlock()
+	if s.tenantInFlight[tenant] >= limit {
+		s.tenantStats[tenant] = TenantCounters{QuotaRejected: s.tenantStats[tenant].QuotaRejected + 1}
+		return func() {}, false
+	}
+	s.tenantInFlight[tenant]++
+	return func() { s.tenantStatsMu.Lock(); s.tenantInFlight[tenant]--; s.tenantStatsMu.Unlock() }, true
 }
 func (s *Server) TenantStats() map[string]TenantCounters {
 	s.tenantStatsMu.Lock()
@@ -242,18 +263,19 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		}
 	}
 	return &Server{
-		grpcAddr:     grpcAddr,
-		httpAddr:     httpAddr,
-		maxRecv:      maxRecvBytes,
-		sink:         sink,
-		tenantMap:    security.TenantMap,
-		tenantLimits: security.TenantLimits,
-		tenantStats:  makeTenantStats(security.TenantMap),
-		journal:      admissionJournal,
-		dedup:        newDedupWindow(100000, 15*time.Minute),
-		grpcSecurity: security.GRPC,
-		httpSecurity: security.HTTP,
-		ready:        make(chan struct{}),
+		grpcAddr:       grpcAddr,
+		httpAddr:       httpAddr,
+		maxRecv:        maxRecvBytes,
+		sink:           sink,
+		tenantMap:      security.TenantMap,
+		tenantLimits:   security.TenantLimits,
+		tenantStats:    makeTenantStats(security.TenantMap),
+		tenantInFlight: make(map[string]int),
+		journal:        admissionJournal,
+		dedup:          newDedupWindow(100000, 15*time.Minute),
+		grpcSecurity:   security.GRPC,
+		httpSecurity:   security.HTTP,
+		ready:          make(chan struct{}),
 	}, nil
 }
 
@@ -657,6 +679,11 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 	if !ok {
 		return 0, "", errors.New("tenant principal is not authorized")
 	}
+	release, allowed := s.acquireTenant(ctx)
+	if !allowed {
+		return 0, "", errors.New("tenant concurrency quota exceeded")
+	}
+	defer release()
 	b := model.Batch{Spans: spans}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
 		if tenant, ok := TenantFromContext(ctx); ok {
@@ -688,6 +715,11 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 	if !ok {
 		return 0, "", errors.New("tenant principal is not authorized")
 	}
+	release, allowed := s.acquireTenant(ctx)
+	if !allowed {
+		return 0, "", errors.New("tenant concurrency quota exceeded")
+	}
+	defer release()
 	b := metric.Batch{ResourceMetrics: rm}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
 		if tenant, ok := TenantFromContext(ctx); ok {
@@ -719,6 +751,11 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 	if !ok {
 		return 0, "", errors.New("tenant principal is not authorized")
 	}
+	release, allowed := s.acquireTenant(ctx)
+	if !allowed {
+		return 0, "", errors.New("tenant concurrency quota exceeded")
+	}
+	defer release()
 	b := logs.Batch{ResourceLogs: rl}
 	if quotaExceeded(ctx, s.tenantLimits, b.Len(), int64(b.SizeBytes())) {
 		if tenant, ok := TenantFromContext(ctx); ok {
