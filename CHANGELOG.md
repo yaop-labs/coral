@@ -25,6 +25,8 @@ tested, documented increment.
   self-deadlock; tenant/signal scoping remains covered by race-tested tests.
 - Added deterministic TTL-expiry and bounded-eviction coverage for the dedup
   window.
+- Corrected roadmap status to reflect the implemented HTTP dedup lookup/commit
+  path and bounded hit/conflict observability.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and
