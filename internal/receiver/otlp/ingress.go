@@ -311,11 +311,19 @@ func (s *Server) rememberHTTP(req *http.Request, signal, key string, body []byte
 	s.dedup.remember(principal, signal, key, body)
 }
 
-func (s *Server) appendAdmission(payload []byte) error {
+func (s *Server) appendAdmission(ctx context.Context, signal string, payload []byte) error {
 	if s.journal == nil {
 		return nil
 	}
-	return s.journal.Append(payload)
+	tenant, _ := TenantFromContext(ctx)
+	if tenant == "" {
+		principal, _ := bearer.PrincipalFromContext(ctx)
+		tenant = principal
+		if mapped, ok := s.tenantMap[principal]; ok {
+			tenant = mapped
+		}
+	}
+	return s.journal.Append(journal.EncodeEnvelope(journal.Envelope{Signal: signal, Tenant: tenant, Payload: payload}))
 }
 
 // ReplayAdmission replays durable admission records. The caller supplies the
@@ -665,7 +673,7 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	if err := g.s.appendAdmission(mustMarshal(req)); err != nil {
+	if err := g.s.appendAdmission(ctx, "traces", mustMarshal(req)); err != nil {
 		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
@@ -698,7 +706,7 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	if err := g.s.appendAdmission(mustMarshal(req)); err != nil {
+	if err := g.s.appendAdmission(ctx, "metrics", mustMarshal(req)); err != nil {
 		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
@@ -730,7 +738,7 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	if err := g.s.appendAdmission(mustMarshal(req)); err != nil {
+	if err := g.s.appendAdmission(ctx, "logs", mustMarshal(req)); err != nil {
 		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
@@ -774,7 +782,7 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &coltracepb.ExportTraceServiceResponse{})
 		return
 	}
-	if err := s.appendAdmission(body); err != nil {
+	if err := s.appendAdmission(req.Context(), "traces", body); err != nil {
 		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -825,7 +833,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &colmetricspb.ExportMetricsServiceResponse{})
 		return
 	}
-	if err := s.appendAdmission(body); err != nil {
+	if err := s.appendAdmission(req.Context(), "metrics", body); err != nil {
 		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -875,7 +883,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &collogspb.ExportLogsServiceResponse{})
 		return
 	}
-	if err := s.appendAdmission(body); err != nil {
+	if err := s.appendAdmission(req.Context(), "logs", body); err != nil {
 		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
