@@ -59,6 +59,8 @@ tested, documented increment.
   observability; series/temporality/Amber work remains explicitly open.
 - Metric redaction now also scrubs exemplar filtered attributes, preserving the
   configured privacy policy across all supported metric datapoint types.
+- Added end-to-end Amber exporter coverage proving metric exemplar fields are
+  preserved through Coral processing.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 

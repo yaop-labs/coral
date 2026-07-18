@@ -56,6 +56,7 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 			Name: "cpu_seconds_total",
 			Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{
 				TimeUnixNano: 1, Value: &metricspb.NumberDataPoint_AsInt{AsInt: 7},
+				Exemplars: []*metricspb.Exemplar{{TimeUnixNano: 2, Value: &metricspb.Exemplar_AsDouble{AsDouble: 3.5}, FilteredAttributes: []*commonpb.KeyValue{stringKV("trace_id", "abc")}}},
 			}}}},
 		}}}},
 	}}}
@@ -86,6 +87,10 @@ func TestMetricPipelineEndToEnd(t *testing.T) {
 	m := got.ResourceMetrics[0].ScopeMetrics[0].Metrics[0]
 	if m.Name != "cpu_seconds_total" || m.GetGauge().DataPoints[0].GetAsInt() != 7 {
 		t.Errorf("metric not preserved: %+v", m)
+	}
+	exemplar := m.GetGauge().DataPoints[0].GetExemplars()[0]
+	if exemplar.GetTimeUnixNano() != 2 || exemplar.GetAsDouble() != 3.5 {
+		t.Errorf("exemplar not preserved: %+v", exemplar)
 	}
 }
 
