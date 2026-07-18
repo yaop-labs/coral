@@ -31,12 +31,13 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 // Config is the collector configuration.
 type Config struct {
 	// TenantMap binds authenticated Reef principals to stable tenant IDs.
-	TenantMap  map[string]string `yaml:"tenant_map"`
-	Pipeline   PipelineConfig    `yaml:"pipeline"`
-	Receivers  ReceiversConfig   `yaml:"receivers"`
-	Processors []ProcessorConfig `yaml:"processors"`
-	Exporters  []ExporterConfig  `yaml:"exporters"`
-	Metrics    MetricsConfig     `yaml:"metrics"`
+	TenantMap    map[string]string      `yaml:"tenant_map"`
+	TenantLimits map[string]TenantLimit `yaml:"tenant_limits"`
+	Pipeline     PipelineConfig         `yaml:"pipeline"`
+	Receivers    ReceiversConfig        `yaml:"receivers"`
+	Processors   []ProcessorConfig      `yaml:"processors"`
+	Exporters    []ExporterConfig       `yaml:"exporters"`
+	Metrics      MetricsConfig          `yaml:"metrics"`
 
 	// MetricPipeline is the optional metrics path (wisp → coral → amber),
 	// independent of the trace pipeline above.
@@ -44,6 +45,11 @@ type Config struct {
 
 	// LogPipeline is the optional logs path, independent of traces and metrics.
 	LogPipeline *LogPipelineConfig `yaml:"log_pipeline"`
+}
+
+type TenantLimit struct {
+	MaxItems int   `yaml:"max_items"`
+	MaxBytes int64 `yaml:"max_bytes"`
 }
 
 // PipelineConfig configures pipeline concurrency.
