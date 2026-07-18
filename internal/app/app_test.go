@@ -398,6 +398,23 @@ func TestApp_TailSamplingProcessor(t *testing.T) {
 	}
 }
 
+func TestApp_TailSamplerMetrics(t *testing.T) {
+	cfg := testConfig()
+	cfg.Processors = []config.ProcessorConfig{{Type: "tail_sampling"}}
+	a, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New with tail_sampling processor: %v", err)
+	}
+	a.transition(gyre.StateReady, "test", "ready")
+	rec := httptest.NewRecorder()
+	a.selfObsMux(a.pipeline).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, name := range []string{"coral_trace_sampler_pending_traces", "coral_trace_sampler_pending_bytes", "coral_trace_sampler_evictions_total", "coral_trace_sampler_late_spans_total"} {
+		if !strings.Contains(rec.Body.String(), name) {
+			t.Errorf("/metrics missing %s", name)
+		}
+	}
+}
+
 func TestApp_HeadSamplingProcessorRemoved(t *testing.T) {
 	cfg := testConfig()
 	cfg.Processors = []config.ProcessorConfig{{Type: "head_sampling"}}

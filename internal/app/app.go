@@ -45,6 +45,7 @@ type App struct {
 
 	metricPipeline *metric.Pipeline // nil unless metric_pipeline is configured
 	logPipeline    *logs.Pipeline   // nil unless log_pipeline is configured
+	tailSampler    *sampling.TailSampler
 	credentialObs  *credentialMetrics
 
 	// ingress is the unified OTLP endpoint (4317/4318) feeding every signal
@@ -811,6 +812,13 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_points_out counter\ncoral_metric_points_out %d\n", pointsOut)
 			_, _ = fmt.Fprintf(w, "# TYPE coral_metric_exporter_batches_dropped counter\ncoral_metric_exporter_batches_dropped %d\n", a.metricPipeline.ExporterDrops())
 		}
+		if a.tailSampler != nil {
+			pendingTraces, pendingBytes, evictions, lateSpans := a.tailSampler.DetailedStats()
+			_, _ = fmt.Fprintf(w, "# TYPE coral_trace_sampler_pending_traces gauge\ncoral_trace_sampler_pending_traces %d\n", pendingTraces)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_trace_sampler_pending_bytes gauge\ncoral_trace_sampler_pending_bytes %d\n", pendingBytes)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_trace_sampler_evictions_total counter\ncoral_trace_sampler_evictions_total %d\n", evictions)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_trace_sampler_late_spans_total counter\ncoral_trace_sampler_late_spans_total %d\n", lateSpans)
+		}
 		if a.logPipeline != nil {
 			_, _, recordsOut := a.logPipeline.Stats()
 			depth, capacity := a.logPipeline.QueueDepth()
@@ -996,6 +1004,7 @@ func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline[model.Batch]
 			tenant, _ := otlprecv.TenantFromContext(ctx)
 			return tenant
 		})
+		a.tailSampler = ts
 		a.hooks = append(a.hooks, lifecycleHook{
 			start: func(ctx context.Context) error {
 				ts.Start(ctx)
