@@ -341,8 +341,9 @@ snapshot are implemented. Replay worker, compaction/age TTL, and crash-injected
 end-to-end recovery remain open before marking this increment complete.
 
 Replay worker, post-success compaction, and age-based TTL compaction are now
-wired and tested; the remaining completion gate is process-level crash
-injection across append/fsync/replay/compact boundaries.
+wired and tested; process-level append-crash recovery is now covered. Remaining
+depth is fault injection at fsync/compact boundaries and long-run capacity
+validation before a release tag.
 
 Records written before routed envelopes are replayable only through the legacy
 opaque `ReplayAdmission` callback. `ReplayRouted` rejects those records rather
