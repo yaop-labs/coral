@@ -260,6 +260,28 @@ func validateWispHTTP(w http.ResponseWriter, req *http.Request) bool {
 	return true
 }
 
+func (s *Server) dedupHTTP(req *http.Request, signal string, body []byte) (dedupResult, string, error) {
+	id := req.Header.Get("x-wisp-envelope-id")
+	if id == "" {
+		return dedupNew, "", nil
+	}
+	identity, err := parseWispHeaders(id, signal)
+	if err != nil {
+		return dedupNew, "", err
+	}
+	principal, _ := bearer.PrincipalFromContext(req.Context())
+	key := hex.EncodeToString(identity.EnvelopeID[:])
+	return s.dedup.lookup(principal, signal, key, body), key, nil
+}
+
+func (s *Server) rememberHTTP(req *http.Request, signal, key string, body []byte) {
+	if key == "" {
+		return
+	}
+	principal, _ := bearer.PrincipalFromContext(req.Context())
+	s.dedup.remember(principal, signal, key, body)
+}
+
 // Start binds the listeners and begins serving, returning once both are bound
 // (or a bind fails). It does not block; call Stop to shut down. Start must run
 // after the target pipelines are started, since it feeds them via Sink.
@@ -671,6 +693,19 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		s.errs.Add(1)
 		return
 	}
+	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "traces", body)
+	if dedupErr != nil {
+		http.Error(w, dedupErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if dedup == dedupConflict {
+		http.Error(w, "wisp envelope id payload conflict", http.StatusBadRequest)
+		return
+	}
+	if dedup == dedupHit {
+		writeResponse(w, enc, &coltracepb.ExportTraceServiceResponse{})
+		return
+	}
 	var pb coltracepb.ExportTraceServiceRequest
 	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
 		s.errs.Add(1)
@@ -684,6 +719,7 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	s.rememberHTTP(req, "traces", dedupKey, body)
 	resp := &coltracepb.ExportTraceServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &coltracepb.ExportTracePartialSuccess{
@@ -704,6 +740,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		s.errs.Add(1)
 		return
 	}
+	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "metrics", body)
+	if dedupErr != nil {
+		http.Error(w, dedupErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if dedup == dedupConflict {
+		http.Error(w, "wisp envelope id payload conflict", http.StatusBadRequest)
+		return
+	}
+	if dedup == dedupHit {
+		writeResponse(w, enc, &colmetricspb.ExportMetricsServiceResponse{})
+		return
+	}
 	var pb colmetricspb.ExportMetricsServiceRequest
 	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
 		s.errs.Add(1)
@@ -716,6 +765,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	s.rememberHTTP(req, "metrics", dedupKey, body)
 	resp := &colmetricspb.ExportMetricsServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &colmetricspb.ExportMetricsPartialSuccess{
@@ -736,6 +786,19 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		s.errs.Add(1)
 		return
 	}
+	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "logs", body)
+	if dedupErr != nil {
+		http.Error(w, dedupErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if dedup == dedupConflict {
+		http.Error(w, "wisp envelope id payload conflict", http.StatusBadRequest)
+		return
+	}
+	if dedup == dedupHit {
+		writeResponse(w, enc, &collogspb.ExportLogsServiceResponse{})
+		return
+	}
 	var pb collogspb.ExportLogsServiceRequest
 	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
 		s.errs.Add(1)
@@ -748,6 +811,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "pipeline unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	s.rememberHTTP(req, "logs", dedupKey, body)
 	resp := &collogspb.ExportLogsServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &collogspb.ExportLogsPartialSuccess{
