@@ -28,6 +28,7 @@ import (
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/coral/internal/otlphttp"
+	"github.com/yaop-labs/reef/bearer"
 	"github.com/yaop-labs/reef/credential"
 	"github.com/yaop-labs/reef/edge"
 	"github.com/yaop-labs/reef/grpcreef"
@@ -53,6 +54,23 @@ type Sink struct {
 	TraceAdmit  func(model.Batch) (admit model.Batch, rejected int, reason string)
 	MetricAdmit func(metric.Batch) (admit metric.Batch, rejected int, reason string)
 	LogAdmit    func(logs.Batch) (admit logs.Batch, rejected int, reason string)
+}
+
+type tenantContextKey struct{}
+
+// TenantFromContext returns the authenticated Reef principal used as the
+// default tenant identity. It is intentionally separate from payload data.
+func TenantFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(tenantContextKey{}).(string)
+	return v, ok && v != ""
+}
+
+func tenantContext(ctx context.Context) context.Context {
+	principal, ok := bearer.PrincipalFromContext(ctx)
+	if !ok || principal == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tenantContextKey{}, principal)
 }
 
 // Server is the unified OTLP ingress: one gRPC server and one HTTP mux serving
@@ -380,6 +398,7 @@ func (s *Server) Rejected() (traces, points, logs uint64) {
 // admitTraces applies the trace admit hook (if any), enqueues the admitted
 // spans, and reports how many were rejected as invalid (partial_success).
 func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected int, reason string, err error) {
+	ctx = tenantContext(ctx)
 	b := model.Batch{Spans: spans}
 	if s.sink.TraceAdmit != nil {
 		b, rejected, reason = s.sink.TraceAdmit(b)
@@ -397,6 +416,7 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 }
 
 func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetrics) (rejected int, reason string, err error) {
+	ctx = tenantContext(ctx)
 	b := metric.Batch{ResourceMetrics: rm}
 	if s.sink.MetricAdmit != nil {
 		b, rejected, reason = s.sink.MetricAdmit(b)
@@ -414,6 +434,7 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 }
 
 func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (rejected int, reason string, err error) {
+	ctx = tenantContext(ctx)
 	b := logs.Batch{ResourceLogs: rl}
 	if s.sink.LogAdmit != nil {
 		b, rejected, reason = s.sink.LogAdmit(b)
