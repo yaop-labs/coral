@@ -70,6 +70,10 @@ type (
 )
 
 // NewPipeline builds a metric pipeline over the shared generic worker-pool.
-func NewPipeline(workers, queueSize int, logger *slog.Logger) *Pipeline {
-	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize}, logger)
+func NewPipeline(workers, queueSize int, logger *slog.Logger, queueBytes ...int64) *Pipeline {
+	var bytes int64
+	if len(queueBytes) > 0 {
+		bytes = queueBytes[0]
+	}
+	return pipeline.New[Batch](pipeline.Config{Workers: workers, QueueSize: queueSize, QueueBytes: bytes}, logger)
 }

@@ -282,7 +282,7 @@ func buildMetricPipeline(
 	logger *slog.Logger,
 	observer credential.Observer,
 ) (*metric.Pipeline, error) {
-	mp := metric.NewPipeline(base.Workers, base.QueueSize, logger)
+	mp := metric.NewPipeline(base.Workers, base.QueueSize, logger, base.QueueBytes)
 	mp.AddProcessor(metric.NewServiceNameProcessor()) // contract §6
 
 	for i, pc := range cfg.Processors {
@@ -358,7 +358,7 @@ func buildLogPipeline(
 	logger *slog.Logger,
 	observer credential.Observer,
 ) (*logs.Pipeline, error) {
-	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger)
+	lp := logs.NewPipeline(base.Workers, base.QueueSize, logger, base.QueueBytes)
 	lp.AddProcessor(logs.NewServiceNameProcessor()) // contract §6
 
 	for i, pc := range cfg.Processors {
