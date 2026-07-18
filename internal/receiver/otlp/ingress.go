@@ -318,6 +318,15 @@ func (s *Server) appendAdmission(payload []byte) error {
 	return s.journal.Append(payload)
 }
 
+// ReplayAdmission replays durable admission records. The caller supplies the
+// handoff function so replay policy stays explicit and bounded at startup.
+func (s *Server) ReplayAdmission(fn func([]byte) error) error {
+	if s.journal == nil {
+		return nil
+	}
+	return s.journal.Replay(fn)
+}
+
 // Start binds the listeners and begins serving, returning once both are bound
 // (or a bind fails). It does not block; call Stop to shut down. Start must run
 // after the target pipelines are started, since it feeds them via Sink.
