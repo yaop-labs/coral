@@ -53,6 +53,8 @@ tested, documented increment.
   reflection; violations are rejected before sink/journal.
 - Added tenant `max_metric_attribute_keys` to bound distinct metric label-key
   cardinality per request.
+- Reconciled Increment 10 progress with the implemented metric bounds and
+  observability; series/temporality/Amber work remains explicitly open.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
   is created until a user-visible release increment is bundled.
 
