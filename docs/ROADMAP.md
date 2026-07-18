@@ -544,8 +544,9 @@ then enforce modes.
 
 Implementation progress: tail sampler pending state is bounded by trace count
 and bytes; eviction/timeout/close accounting, idempotent start/close lifecycle,
-thread-safe pending stats, and tenant-aware trace keying are covered. Restart
-checkpoints and complete late/incomplete observability remain open.
+thread-safe pending stats, tenant-aware trace keying, and process-local
+eviction/late-span counters are covered. Restart checkpoints and complete
+late/incomplete observability wiring remain open.
 
 **Goal.** Add production trace semantics after lossless transport and durable
 admission are established.

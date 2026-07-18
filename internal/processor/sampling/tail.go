@@ -72,6 +72,8 @@ type TailSampler struct {
 	maxTraces    int
 	maxBytes     int64
 	currentBytes int64
+	evictions    uint64
+	lateSpans    uint64
 	defaultRate  float64
 	rules        []Rule
 	export       func(context.Context, model.Batch) error
@@ -94,6 +96,15 @@ func (ts *TailSampler) Stats() (pendingTraces int, pendingBytes int64) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return len(ts.pending), ts.currentBytes
+}
+
+// DetailedStats reports bounded sampler state and lifecycle counters. Counters
+// are process-local and reset on restart; they are intended for observability,
+// not durable accounting.
+func (ts *TailSampler) DetailedStats() (pendingTraces int, pendingBytes int64, evictions, lateSpans uint64) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return len(ts.pending), ts.currentBytes, ts.evictions, ts.lateSpans
 }
 
 func NewTail(
@@ -151,6 +162,7 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 	for _, s := range b.Spans {
 		key := traceKey{tenant: tenant, id: s.TraceID}
 		if d, ok := ts.decided.Get(key); ok {
+			ts.lateSpans++
 			if d == decisionKeep {
 				emit = append(emit, model.Batch{Spans: []model.Span{s}})
 			}
@@ -160,6 +172,7 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 		if !ok {
 			if len(ts.pending) >= ts.maxTraces {
 				if evicted := ts.evictOldestLocked(); evicted != nil {
+					ts.evictions++
 					ts.currentBytes -= pendingBytes(evicted)
 					d := ts.decide(evicted)
 					ts.decided.Add(traceKey{tenant: evicted.Tenant, id: evicted.ID}, d)

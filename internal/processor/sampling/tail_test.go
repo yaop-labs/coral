@@ -78,6 +78,23 @@ func TestTailSampler_TenantAwareTraceKeys(t *testing.T) {
 	}
 }
 
+func TestTailSampler_DetailedStatsCountEvictionAndLateSpan(t *testing.T) {
+	ts := NewTail(time.Hour, 1, 1, nil, func(context.Context, model.Batch) error { return nil })
+	first := traceSpan(21, 1, model.StatusOK)
+	second := traceSpan(22, 2, model.StatusOK)
+	if _, err := ts.Process(context.Background(), model.Batch{Spans: []model.Span{first, second}}); err != nil {
+		t.Fatal(err)
+	}
+	// The first trace was evicted and force-decided; a subsequent span is late.
+	if _, err := ts.Process(context.Background(), model.Batch{Spans: []model.Span{first}}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, evictions, late := ts.DetailedStats()
+	if evictions != 1 || late != 1 {
+		t.Fatalf("stats = evictions %d, late %d; want 1, 1", evictions, late)
+	}
+}
+
 func TestTailSampler_DropAtZeroRate(t *testing.T) {
 	var mu sync.Mutex
 	var exported []model.Span

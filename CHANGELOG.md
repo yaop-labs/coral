@@ -79,6 +79,9 @@ tested, documented increment.
 - Tail sampler buffering and decision-cache keys now include the authenticated
   tenant identity, preventing same-TraceID cross-tenant assembly or deduplication.
 - Added a regression test covering identical TraceIDs arriving for two tenants.
+- Added bounded process-local tail-sampler counters for forced evictions and
+  late spans, with detailed stats coverage; durable restart checkpoints remain
+  a later capability.
 - Added Amber exporter coverage proving cumulative Sum temporality and
   monotonicity are preserved without implicit conversion.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag
