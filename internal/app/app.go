@@ -169,7 +169,7 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		logger.Info("log pipeline enabled")
 	}
 
-	if err := a.addIngress(cfg.Receivers, traceActive, validateSpanLimit(cfg.Processors)); err != nil {
+	if err := a.addIngress(cfg.Receivers, cfg.TenantMap, traceActive, validateSpanLimit(cfg.Processors)); err != nil {
 		return nil, fmt.Errorf("otlp ingress: %w", err)
 	}
 	constructed = true
@@ -197,9 +197,10 @@ func (a *App) closeUnstarted() {
 // pipeline is absent are left unserved (Unimplemented / 404). A config with
 // only legacy trace receivers builds no ingress. spanLimit (>0) enables
 // accept-time rejection of oversized spans with a partial_success report.
-func (a *App) addIngress(cfg config.ReceiversConfig, traceActive bool, spanLimit int) error {
+func (a *App) addIngress(cfg config.ReceiversConfig, tenantMap map[string]string, traceActive bool, spanLimit int) error {
 	grpcAddr, httpAddr := "", ""
 	security := otlprecv.SecurityConfig{}
+	security.TenantMap = tenantMap
 	if cfg.OTLPGRPC != nil {
 		grpcAddr = cfg.OTLPGRPC.Endpoint
 		security.GRPC = serverEdgeConfig(*cfg.OTLPGRPC, a.credentialObs)

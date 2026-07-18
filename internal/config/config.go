@@ -30,6 +30,8 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 
 // Config is the collector configuration.
 type Config struct {
+	// TenantMap binds authenticated Reef principals to stable tenant IDs.
+	TenantMap  map[string]string `yaml:"tenant_map"`
 	Pipeline   PipelineConfig    `yaml:"pipeline"`
 	Receivers  ReceiversConfig   `yaml:"receivers"`
 	Processors []ProcessorConfig `yaml:"processors"`
