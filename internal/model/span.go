@@ -225,6 +225,16 @@ type Span struct {
 	Status       SpanStatus
 	StatusMsg    string
 	Attrs        []Attribute
+	// OTLP preserves the original span for lossless downstream encoding while
+	// the normalized fields remain available to existing processors.
+	OTLP              []byte
+	ScopeName         string
+	ScopeVersion      string
+	SchemaURL         string
+	TraceFlags        uint32
+	DroppedAttributes uint32
+	DroppedEvents     uint32
+	DroppedLinks      uint32
 }
 
 func (s Span) Duration() time.Duration { return s.EndTime.Sub(s.StartTime) }

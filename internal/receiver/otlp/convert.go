@@ -6,6 +6,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/model"
 )
@@ -16,14 +17,30 @@ func spansFromResourceSpans(rs []*tracepb.ResourceSpans) []model.Span {
 		res := resourceFromProto(r.GetResource())
 		for _, ss := range r.GetScopeSpans() {
 			for _, sp := range ss.GetSpans() {
-				out = append(out, spanFromProto(sp, res))
+				out = append(out, spanFromProto(sp, res, ss.GetScope(), ss.GetSchemaUrl(), r.GetSchemaUrl()))
 			}
 		}
 	}
 	return out
 }
 
-func spanFromProto(s *tracepb.Span, res model.Resource) model.Span {
+func spanFromProto(s *tracepb.Span, res model.Resource, context ...any) model.Span {
+	var scope *commonpb.InstrumentationScope
+	var scopeSchema, resourceSchema string
+	if len(context) > 0 {
+		scope, _ = context[0].(*commonpb.InstrumentationScope)
+	}
+	if len(context) > 1 {
+		scopeSchema, _ = context[1].(string)
+	}
+	if len(context) > 2 {
+		resourceSchema, _ = context[2].(string)
+	}
+	raw, _ := proto.Marshal(s)
+	schema := scopeSchema
+	if schema == "" {
+		schema = resourceSchema
+	}
 	return model.Span{
 		TraceID:      bytesToTraceID(s.GetTraceId()),
 		SpanID:       bytesToSpanID(s.GetSpanId()),
@@ -36,6 +53,9 @@ func spanFromProto(s *tracepb.Span, res model.Resource) model.Span {
 		Status:       statusFromProto(s.GetStatus()),
 		StatusMsg:    s.GetStatus().GetMessage(),
 		Attrs:        attrsFromKV(s.GetAttributes()),
+		OTLP:         raw, ScopeName: scope.GetName(), ScopeVersion: scope.GetVersion(), SchemaURL: schema,
+		TraceFlags: uint32(s.GetFlags()), DroppedAttributes: s.GetDroppedAttributesCount(),
+		DroppedEvents: s.GetDroppedEventsCount(), DroppedLinks: s.GetDroppedLinksCount(),
 	}
 }
 
