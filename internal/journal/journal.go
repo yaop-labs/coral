@@ -270,18 +270,37 @@ func (j *Journal) CompactOlderThan(age time.Duration) error {
 		}
 		off = end
 	}
-	if err := j.f.Truncate(0); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(j.path), ".coral-journal-*")
+	if err != nil {
 		return err
 	}
-	if _, err := j.f.Seek(0, io.SeekStart); err != nil {
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err = tmp.Write(kept); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	if _, err := j.f.Write(kept); err != nil {
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	if err := j.syncFn(); err != nil {
+	if err = tmp.Close(); err != nil {
 		return err
 	}
+	if err = j.syncFn(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpPath, j.path); err != nil {
+		return err
+	}
+	if err = j.f.Close(); err != nil {
+		return err
+	}
+	j.f, err = os.OpenFile(j.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	j.syncFn = j.f.Sync
 	j.size = int64(len(kept))
 	return nil
 }
