@@ -335,6 +335,15 @@ func TestTailSampler_StatsAreBounded(t *testing.T) {
 	}
 }
 
+func TestTailSampler_StartIsIdempotent(t *testing.T) {
+	ts := NewTail(time.Millisecond, 10, 1, nil, func(context.Context, model.Batch) error { return nil })
+	ts.Start(context.Background())
+	ts.Start(context.Background())
+	if err := ts.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTailSampler_MaxBytes_Evicts(t *testing.T) {
 	ts := NewTail(time.Minute, 100, 1.0, nil, func(context.Context, model.Batch) error { return nil }, 100)
 	ts.Process(context.Background(), model.Batch{Spans: []model.Span{{TraceID: model.TraceID{1}, Name: "large"}}})

@@ -68,6 +68,8 @@ tested, documented increment.
 - Fixed shutdown flush accounting so tail sampler close leaves no stale pending
   bytes or trace entries.
 - Made tail sampler `Close` idempotent for repeated lifecycle shutdown calls.
+- Made tail sampler `Start` idempotent so repeated lifecycle starts cannot
+  create duplicate ticker goroutines.
 - Exposed thread-safe tail sampler pending trace/byte stats for bounded
   self-observability wiring.
 - Recorded the remaining trace boundary explicitly: the current sampler is

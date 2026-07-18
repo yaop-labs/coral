@@ -79,6 +79,7 @@ type TailSampler struct {
 	done      chan struct{}
 	now       func() time.Time
 	closeOnce sync.Once
+	startOnce sync.Once
 }
 
 // Stats returns the currently buffered trace count and byte usage.
@@ -193,17 +194,19 @@ func pendingBytes(pt *PendingTrace) int64 {
 
 // Start launches the background tick loop that ages out pending traces.
 func (ts *TailSampler) Start(ctx context.Context) {
-	ts.ticker = time.NewTicker(ts.decisionWait / 2)
-	go func() {
-		for {
-			select {
-			case t := <-ts.ticker.C:
-				ts.tickAt(ctx, t)
-			case <-ts.done:
-				return
+	ts.startOnce.Do(func() {
+		ts.ticker = time.NewTicker(ts.decisionWait / 2)
+		go func() {
+			for {
+				select {
+				case t := <-ts.ticker.C:
+					ts.tickAt(ctx, t)
+				case <-ts.done:
+					return
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // tickAt ages out traces whose last span arrived more than decisionWait ago.
