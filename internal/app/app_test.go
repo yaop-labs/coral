@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yaop-labs/coral/internal/config"
+	"github.com/yaop-labs/gyre"
 )
 
 func testConfig() config.Config {
@@ -58,15 +62,27 @@ func TestApp_SelfObsMux(t *testing.T) {
 	if code := selfObsGet(t, h, "/readyz"); code != http.StatusServiceUnavailable {
 		t.Errorf("/readyz before ready = %d, want 503", code)
 	}
-	a.readiness.Store(uint32(readinessReady))
+	a.transition(gyre.StateReady, "test", "ready for test")
 	if code := selfObsGet(t, h, "/readyz"); code != http.StatusOK {
 		t.Errorf("/readyz after ready = %d, want 200", code)
 	}
 	if code := selfObsGet(t, h, "/healthz"); code != http.StatusOK {
 		t.Errorf("/healthz = %d, want 200", code)
 	}
-
 	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/status = %d, want 200", rec.Code)
+	}
+	var status gyre.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if status.Name != "coral" || status.State != gyre.StateReady {
+		t.Errorf("/status = %+v", status)
+	}
+
+	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 	if !strings.Contains(body, "coral_batches_in") {
@@ -88,6 +104,124 @@ func TestApp_SelfObsMux(t *testing.T) {
 	}
 	if strings.Contains(body, "collector_") {
 		t.Errorf("/metrics still uses the legacy collector_ prefix:\n%s", body)
+	}
+}
+
+func TestApp_GyreConformanceCloseBeforeStart(t *testing.T) {
+	a, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := gyre.ConformanceCheck(t.Context(), a); err != nil {
+		t.Fatalf("Gyre conformance: %v", err)
+	}
+	if got := a.Status().State; got != gyre.StateStopped {
+		t.Fatalf("state after close-before-start = %q, want %q", got, gyre.StateStopped)
+	}
+	err = a.Start(t.Context())
+	var gyreErr *gyre.Error
+	if !errors.As(err, &gyreErr) || gyreErr.Code != gyre.CodeShuttingDown {
+		t.Fatalf("Start after Close error = %v, want Gyre shutting_down", err)
+	}
+}
+
+func TestApp_CloseIsIdempotent(t *testing.T) {
+	a, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Close(stopCtx); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := a.Close(stopCtx); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if got := a.Status().State; got != gyre.StateStopped {
+		t.Fatalf("state = %q, want %q", got, gyre.StateStopped)
+	}
+}
+
+func TestApp_CloseHonorsContextWhileCleanupContinues(t *testing.T) {
+	a, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	release := make(chan struct{})
+	a.hooks = append(a.hooks, lifecycleHook{
+		start: func(context.Context) error { return nil },
+		stop: func(context.Context) error {
+			<-release
+			return nil
+		},
+	})
+	if err := a.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err = a.Close(stopCtx)
+	var gyreErr *gyre.Error
+	if !errors.As(err, &gyreErr) || gyreErr.Code != gyre.CodeShuttingDown {
+		t.Fatalf("Close error = %v, want Gyre shutting_down", err)
+	}
+
+	close(release)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := a.Close(waitCtx); err != nil {
+		t.Fatalf("Close after cleanup release: %v", err)
+	}
+	if got := a.Status().State; got != gyre.StateStopped {
+		t.Fatalf("state = %q, want %q", got, gyre.StateStopped)
+	}
+}
+
+func TestApp_StartFailureRollsBackStartedResources(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy ingress address: %v", err)
+	}
+	defer occupied.Close()
+
+	metricsProbe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve metrics address: %v", err)
+	}
+	metricsAddr := metricsProbe.Addr().String()
+	if err := metricsProbe.Close(); err != nil {
+		t.Fatalf("release metrics address: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.Metrics.Endpoint = metricsAddr
+	cfg.Receivers.OTLPGRPC.Endpoint = occupied.Addr().String()
+	cfg.Receivers.OTLPHTTP = nil
+	a, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = a.Start(t.Context())
+	var gyreErr *gyre.Error
+	if !errors.As(err, &gyreErr) || gyreErr.Code != gyre.CodeUnavailable {
+		t.Fatalf("Start error = %v, want Gyre unavailable", err)
+	}
+	if got := a.Status().State; got != gyre.StateFailed {
+		t.Fatalf("state = %q, want %q", got, gyre.StateFailed)
+	}
+
+	rebound, err := net.Listen("tcp", metricsAddr)
+	if err != nil {
+		t.Fatalf("metrics listener leaked after failed Start: %v", err)
+	}
+	_ = rebound.Close()
+	if err := a.Close(t.Context()); err != nil {
+		t.Fatalf("Close after failed Start: %v", err)
 	}
 }
 

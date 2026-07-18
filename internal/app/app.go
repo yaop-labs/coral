@@ -3,12 +3,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/yaop-labs/coral/internal/buildinfo"
@@ -27,6 +28,7 @@ import (
 	jaegerrecv "github.com/yaop-labs/coral/internal/receiver/jaeger"
 	otlprecv "github.com/yaop-labs/coral/internal/receiver/otlp"
 	zipkinrecv "github.com/yaop-labs/coral/internal/receiver/zipkin"
+	"github.com/yaop-labs/gyre"
 	"github.com/yaop-labs/reef/reefclient"
 	"github.com/yaop-labs/reef/tlsconf"
 )
@@ -42,34 +44,32 @@ type App struct {
 	// ingress is the unified OTLP endpoint (4317/4318) feeding every signal
 	// pipeline; nil when no OTLP receiver is configured. Legacy Jaeger/Zipkin
 	// trace receivers remain attached directly to the trace pipeline.
-	ingress    *otlprecv.Server
-	startHooks []func(context.Context) error
-	stopHooks  []func(context.Context) error
+	ingress *otlprecv.Server
+	hooks   []lifecycleHook
 
-	readiness atomic.Uint32
+	lifecycleMu sync.Mutex
+	statusMu    sync.RWMutex
+	state       gyre.State
+	since       time.Time
+	condition   gyre.Condition
+
+	startedHooks   int
+	metricStarted  bool
+	logStarted     bool
+	traceStarted   bool
+	ingressStarted bool
+	startAttempted bool
+	closed         bool
+	closeDone      chan struct{}
+	closeErr       error
 }
 
-type readinessState uint32
-
-const (
-	readinessStarting readinessState = iota
-	readinessReady
-	readinessStopping
-	readinessFailed
-)
-
-func (s readinessState) String() string {
-	switch s {
-	case readinessReady:
-		return "ready"
-	case readinessStopping:
-		return "stopping"
-	case readinessFailed:
-		return "failed"
-	default:
-		return "starting"
-	}
+type lifecycleHook struct {
+	start func(context.Context) error
+	stop  func(context.Context) error
 }
+
+var _ gyre.Component = (*App)(nil)
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	return newApp(cfg, logger, nil)
@@ -93,7 +93,20 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 		QueueSize: cfg.Pipeline.QueueSize,
 	}, logger)
 
-	a := &App{logger: logger, pipeline: p}
+	now := time.Now().UTC()
+	a := &App{
+		logger:   logger,
+		pipeline: p,
+		state:    gyre.StateStarting,
+		since:    now,
+		condition: gyre.Condition{
+			Type:           "Ready",
+			Status:         false,
+			Reason:         "starting",
+			Message:        "component has not started",
+			LastTransition: now,
+		},
+	}
 
 	if err := a.addReceivers(p, cfg.Receivers, logger); err != nil {
 		return nil, err
@@ -377,100 +390,261 @@ func (a *App) OTLPGRPCAddr() string {
 	return a.ingress.GRPCAddr()
 }
 
+// Name returns Coral's stable Gyre component identity.
+func (a *App) Name() string { return "coral" }
+
+// Version returns the same release identity exposed by --version and
+// coral_build_info.
+func (a *App) Version() string { return buildinfo.Current().Version }
+
+// Ready reports whether Coral can currently accept its advertised workload.
+func (a *App) Ready(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return gyre.E(gyre.CodeUnavailable, a.Name(), "ready", true, err)
+	}
+	snapshot := a.Status()
+	if snapshot.State == gyre.StateReady {
+		return nil
+	}
+	reason := string(snapshot.State)
+	if len(snapshot.Conditions) != 0 && snapshot.Conditions[0].Reason != "" {
+		reason = snapshot.Conditions[0].Reason
+	}
+	return gyre.E(
+		gyre.CodeUnavailable,
+		a.Name(),
+		"ready",
+		true,
+		fmt.Errorf("component is not ready: %s", reason),
+	)
+}
+
+// Status returns a bounded, secret-free Gyre lifecycle snapshot.
+func (a *App) Status() gyre.Snapshot {
+	a.statusMu.RLock()
+	defer a.statusMu.RUnlock()
+	return gyre.Snapshot{
+		Name:       a.Name(),
+		Version:    a.Version(),
+		State:      a.state,
+		Generation: 0, // static configuration; reload is a later capability.
+		Since:      a.since,
+		Conditions: []gyre.Condition{a.condition},
+	}
+}
+
 func (a *App) Start(ctx context.Context) error {
-	for _, hook := range a.startHooks {
-		if err := hook(ctx); err != nil {
-			a.readiness.Store(uint32(readinessFailed))
-			return err
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if a.closed {
+		return gyre.E(
+			gyre.CodeShuttingDown,
+			a.Name(),
+			"start",
+			false,
+			errors.New("component is closed"),
+		)
+	}
+	if a.startAttempted {
+		if a.Status().State == gyre.StateReady {
+			return nil
 		}
+		return gyre.E(
+			gyre.CodeUnavailable,
+			a.Name(),
+			"start",
+			false,
+			errors.New("component start was already attempted"),
+		)
+	}
+	a.startAttempted = true
+	a.transition(gyre.StateStarting, "starting", "component startup is in progress")
+
+	for _, hook := range a.hooks {
+		if err := hook.start(ctx); err != nil {
+			return a.startFailed("start_hook", err)
+		}
+		a.startedHooks++
 	}
 	if a.metricPipeline != nil {
 		if err := a.metricPipeline.Start(ctx); err != nil {
-			a.readiness.Store(uint32(readinessFailed))
-			return err
+			return a.startFailed("metric_pipeline", err)
 		}
+		a.metricStarted = true
 	}
 	if a.logPipeline != nil {
 		if err := a.logPipeline.Start(ctx); err != nil {
-			a.readiness.Store(uint32(readinessFailed))
-			return err
+			return a.startFailed("log_pipeline", err)
 		}
+		a.logStarted = true
 	}
 	if err := a.pipeline.Start(ctx); err != nil {
-		a.readiness.Store(uint32(readinessFailed))
-		return err
+		return a.startFailed("trace_pipeline", err)
 	}
+	a.traceStarted = true
 	// The ingress starts last: every pipeline it feeds is already consuming, so
 	// no Enqueue can race a not-yet-started worker pool.
 	if a.ingress != nil {
 		if err := a.ingress.Start(); err != nil {
-			a.readiness.Store(uint32(readinessFailed))
-			return fmt.Errorf("otlp ingress: %w", err)
+			return a.startFailed("otlp_ingress", err)
 		}
+		a.ingressStarted = true
 	}
-	a.readiness.Store(uint32(readinessReady))
+	a.transition(gyre.StateReady, "ready", "component is accepting telemetry")
 	return nil
 }
 
-func (a *App) Shutdown(ctx context.Context) error {
-	a.readiness.Store(uint32(readinessStopping))
+func (a *App) startFailed(operation string, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cleanupErr := a.shutdownStarted(cleanupCtx)
+	a.closed = true
+	a.closeDone = make(chan struct{})
+	a.closeErr = cleanupErr
+	close(a.closeDone)
+	a.transition(gyre.StateFailed, operation+"_failed", "startup failed and started resources were rolled back")
+	return gyre.E(
+		gyre.CodeUnavailable,
+		a.Name(),
+		operation,
+		true,
+		errors.Join(cause, cleanupErr),
+	)
+}
+
+// Close implements Gyre's idempotent, context-bounded shutdown contract.
+// Cleanup continues in the background if the caller's deadline expires.
+func (a *App) Close(ctx context.Context) error {
+	a.lifecycleMu.Lock()
+	if a.closeDone == nil {
+		a.closed = true
+		a.closeDone = make(chan struct{})
+		if !a.startAttempted {
+			a.transition(gyre.StateStopping, "close_before_start", "component was closed before startup")
+			a.transition(gyre.StateStopped, "stopped", "component is stopped")
+			close(a.closeDone)
+		} else {
+			a.transition(gyre.StateStopping, "shutdown", "component shutdown is in progress")
+			go a.finishClose(ctx)
+		}
+	}
+	done := a.closeDone
+	a.lifecycleMu.Unlock()
+
+	select {
+	case <-done:
+		a.lifecycleMu.Lock()
+		err := a.closeErr
+		a.lifecycleMu.Unlock()
+		return err
+	case <-ctx.Done():
+		return gyre.E(gyre.CodeShuttingDown, a.Name(), "close", true, ctx.Err())
+	}
+}
+
+func (a *App) finishClose(ctx context.Context) {
+	err := a.shutdownStarted(ctx)
+	if err != nil {
+		a.transition(gyre.StateFailed, "shutdown_failed", "one or more resources failed to stop")
+	} else {
+		a.transition(gyre.StateStopped, "stopped", "component is stopped")
+	}
+	a.lifecycleMu.Lock()
+	a.closeErr = err
+	close(a.closeDone)
+	a.lifecycleMu.Unlock()
+}
+
+func (a *App) shutdownStarted(ctx context.Context) error {
+	var errs []error
 	// Stop accepting first: after Stop returns no ingress handler is mid-Enqueue,
 	// so it is safe to close the pipeline queues below.
-	if a.ingress != nil {
+	if a.ingressStarted {
 		if err := a.ingress.Stop(ctx); err != nil {
 			a.logger.Error("otlp ingress stop error", "err", err)
+			errs = append(errs, fmt.Errorf("otlp ingress: %w", err))
 		}
+		a.ingressStarted = false
 	}
-	err := a.pipeline.Shutdown(ctx)
-	if a.metricPipeline != nil {
-		if mErr := a.metricPipeline.Shutdown(ctx); mErr != nil && err == nil {
-			err = mErr
+	if a.traceStarted {
+		if err := a.pipeline.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("trace pipeline: %w", err))
 		}
+		a.traceStarted = false
 	}
-	if a.logPipeline != nil {
-		if lErr := a.logPipeline.Shutdown(ctx); lErr != nil && err == nil {
-			err = lErr
+	if a.logStarted {
+		if err := a.logPipeline.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("log pipeline: %w", err))
 		}
+		a.logStarted = false
 	}
-	for i := len(a.stopHooks) - 1; i >= 0; i-- {
-		if stopErr := a.stopHooks[i](ctx); stopErr != nil {
+	if a.metricStarted {
+		if err := a.metricPipeline.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("metric pipeline: %w", err))
+		}
+		a.metricStarted = false
+	}
+	for i := a.startedHooks - 1; i >= 0; i-- {
+		if a.hooks[i].stop == nil {
+			continue
+		}
+		if stopErr := a.hooks[i].stop(ctx); stopErr != nil {
 			a.logger.Error("app stop hook error", "err", stopErr)
-			if err == nil {
-				err = stopErr
-			}
+			errs = append(errs, fmt.Errorf("stop hook %d: %w", i, stopErr))
 		}
 	}
-	return err
+	a.startedHooks = 0
+	return errors.Join(errs...)
+}
+
+// Shutdown is retained as a compatibility alias for existing Coral callers.
+func (a *App) Shutdown(ctx context.Context) error { return a.Close(ctx) }
+
+func (a *App) transition(state gyre.State, reason, message string) {
+	now := time.Now().UTC()
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	a.state = state
+	a.since = now
+	a.condition = gyre.Condition{
+		Type:           "Ready",
+		Status:         state == gyre.StateReady,
+		Reason:         reason,
+		Message:        message,
+		LastTransition: now,
+	}
 }
 
 func (a *App) addMetricsServer(p *pipeline.Pipeline[model.Batch], endpoint string) {
 	var srv *http.Server
-	a.startHooks = append(a.startHooks, func(ctx context.Context) error {
-		ln, err := net.Listen("tcp", endpoint)
-		if err != nil {
-			return fmt.Errorf("metrics: listen %s: %w", endpoint, err)
-		}
-		srv = &http.Server{
-			Handler:           a.selfObsMux(p),
-			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      10 * time.Second,
-			IdleTimeout:       60 * time.Second,
-			MaxHeaderBytes:    16 << 10,
-		}
-		go func() {
-			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && ctx.Err() == nil {
-				a.readiness.Store(uint32(readinessFailed))
-				a.logger.Error("metrics server error", "err", err)
+	a.hooks = append(a.hooks, lifecycleHook{
+		start: func(ctx context.Context) error {
+			ln, err := net.Listen("tcp", endpoint)
+			if err != nil {
+				return fmt.Errorf("metrics: listen %s: %w", endpoint, err)
 			}
-		}()
-		return nil
-	})
-	a.stopHooks = append(a.stopHooks, func(ctx context.Context) error {
-		if srv == nil {
+			srv = &http.Server{
+				Handler:           a.selfObsMux(p),
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      10 * time.Second,
+				IdleTimeout:       60 * time.Second,
+				MaxHeaderBytes:    16 << 10,
+			}
+			go func() {
+				if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && ctx.Err() == nil {
+					a.transition(gyre.StateFailed, "self_observability_failed", "self-observability server exited")
+					a.logger.Error("metrics server error", "err", err)
+				}
+			}()
 			return nil
-		}
-		return srv.Shutdown(ctx)
+		},
+		stop: func(ctx context.Context) error {
+			if srv == nil {
+				return nil
+			}
+			return srv.Shutdown(ctx)
+		},
 	})
 }
 
@@ -490,9 +664,9 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			fmt.Sprintf("%t", build.Modified),
 			prometheusLabelValue(build.GoVersion),
 		)
-		state := readinessState(a.readiness.Load()).String()
+		state := string(a.Status().State)
 		ready := 0
-		if state == readinessReady.String() {
+		if state == string(gyre.StateReady) {
 			ready = 1
 		}
 		_, _ = fmt.Fprintf(w, "# TYPE coral_ready gauge\ncoral_ready %d\n", ready)
@@ -532,19 +706,7 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_otlp_rejected_records counter\ncoral_otlp_rejected_records %d\n", rejRecords)
 		}
 	})
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		state := readinessState(a.readiness.Load())
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if state == readinessReady {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_, _ = fmt.Fprintln(w, state.String())
-	})
+	mux.Handle("/", gyre.HTTPHandler(a))
 	return mux
 }
 
@@ -653,9 +815,11 @@ func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline[model.Batch]
 				return p.ExportFrom(ctx, b, processorIndex+1)
 			},
 		)
-		a.startHooks = append(a.startHooks, func(ctx context.Context) error {
-			ts.Start(ctx)
-			return nil
+		a.hooks = append(a.hooks, lifecycleHook{
+			start: func(ctx context.Context) error {
+				ts.Start(ctx)
+				return nil
+			},
 		})
 		return ts, nil
 
@@ -738,7 +902,7 @@ func buildExporter(ec config.ExporterConfig, a *App) (pipeline.Exporter[model.Ba
 		if err != nil {
 			return nil, err
 		}
-		a.startHooks = append(a.startHooks, e.Init)
+		a.hooks = append(a.hooks, lifecycleHook{start: e.Init})
 		return retryexp.Wrap(e, retryexp.Config{
 			MaxAttempts:    cfg.Retry.MaxAttempts,
 			InitialBackoff: cfg.Retry.InitialBackoff.Std(),

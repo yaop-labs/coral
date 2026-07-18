@@ -1,21 +1,28 @@
 # coral
 
-Trace + metric collector for the yaop stack: receives OTLP/Jaeger/Zipkin, processes, and exports to amber.
+Telemetry admission and routing gateway for the YAOP stack. Coral receives
+standard OTLP traces, metrics, and logs plus legacy Jaeger/Zipkin traces,
+applies explicitly configured processing, and independently routes signals to
+downstream systems.
 
 ## Transport
 
 A single OTLP ingress serves every signal — traces, metrics, and logs — on the
 platform-standard `4317` (gRPC) / `4318` (HTTP) ports (contract §2). Legacy
 trace-only protocols (Jaeger Thrift, Zipkin) keep their own ports. Self-obs
-(`/metrics`, `/healthz`, `/readyz`) is on `4888`.
+(`/metrics`, `/healthz`, `/readyz`, `/status`) is on `4888`. Lifecycle,
+readiness, typed operational errors, and status implement the Gyre v0.5.0
+component contract; Reef remains the transport-security owner.
 
 ## Delivery semantics
 
 Delivery is **at-most-once within coral**: there is no spool, so batches are
-dropped on backpressure or shutdown rather than persisted. End-to-end
-durability rests on the wisp spool and the amber WAL at the edges (contract §1).
-Partially-invalid payloads are answered `200 + partial_success` so senders do
-not retry rejected records (contract §4).
+dropped on backpressure or shutdown rather than persisted. Wisp's spool and
+Amber's WAL are durable at their own boundaries, but they do not close Coral's
+current acknowledgement gap: Coral acknowledges after memory enqueue and can
+lose that accepted batch on crash. Do not treat the current path as end-to-end
+durable. Partially-invalid payloads are answered `200 + partial_success` so
+senders do not retry rejected records (contract §4).
 
 Fan-out destinations have independent bounded queues. A slow or retrying
 destination can drop from its own queue, but cannot delay delivery to the other
@@ -78,4 +85,6 @@ the release gate passes. The current architecture review, responsibility
 boundaries, and capability plan are in
 [`docs/REVIEW.md`](docs/REVIEW.md),
 [`ADR 0001`](docs/adr/0001-coral-role-and-boundaries.md), and
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+[`docs/ROADMAP.md`](docs/ROADMAP.md). Cross-repository Gyre/Reef/Wisp boundaries
+are explicit in
+[`docs/PLATFORM_COMPATIBILITY.md`](docs/PLATFORM_COMPATIBILITY.md).
