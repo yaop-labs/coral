@@ -431,6 +431,9 @@ labels. Admin overrides are audited and bounded.
 success. HTTP/gRPC classifications are equivalent. Unknown downstream partial
 success is retained conservatively rather than dropped.
 
+Journal routing metadata is bounded explicitly; oversized tenant or signal
+identifiers are rejected before append and never acknowledged as durable.
+
 **Observability.** Admission latency, quota utilization/rejections, partial
 success, request size, decompression ratio, and fairness lag with bounded labels.
 

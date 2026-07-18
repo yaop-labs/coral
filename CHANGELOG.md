@@ -15,6 +15,8 @@ tested, documented increment.
   and HTTP `429`, without changing pipeline/storage failure responses.
 - Preserved distinct concurrency and request-rate rejection reasons through
   the shared admission path for diagnostics and protocol responses.
+- Journal admission now rejects oversized tenant/signal routing fields instead
+  of allowing one-byte length truncation and replay corruption.
 
 - Architecture review, responsibility-boundary ADR, and capability roadmap.
 - Process build identity via `--version`, startup logs, and
