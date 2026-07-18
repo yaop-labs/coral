@@ -301,6 +301,21 @@ func TestTailSampler_TickReleasesByteAccounting(t *testing.T) {
 	}
 }
 
+func TestTailSampler_CloseReleasesByteAccounting(t *testing.T) {
+	ts := NewTail(time.Hour, 10, 1, nil, func(context.Context, model.Batch) error { return nil }, 1<<20)
+	if _, err := ts.Process(context.Background(), model.Batch{Spans: []model.Span{traceSpan(10, 1, model.StatusOK)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.currentBytes != 0 || len(ts.pending) != 0 {
+		t.Fatalf("close state bytes=%d pending=%d", ts.currentBytes, len(ts.pending))
+	}
+}
+
 func TestTailSampler_MaxBytes_Evicts(t *testing.T) {
 	ts := NewTail(time.Minute, 100, 1.0, nil, func(context.Context, model.Batch) error { return nil }, 100)
 	ts.Process(context.Background(), model.Batch{Spans: []model.Span{{TraceID: model.TraceID{1}, Name: "large"}}})

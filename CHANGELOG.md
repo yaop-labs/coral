@@ -65,6 +65,8 @@ tested, documented increment.
   regression test for bounded pending state.
 - Fixed tail sampler byte accounting when traces age out at the decision
   horizon, preventing stale pending-byte pressure after normal flush.
+- Fixed shutdown flush accounting so tail sampler close leaves no stale pending
+  bytes or trace entries.
 - Added Amber exporter coverage proving cumulative Sum temporality and
   monotonicity are preserved without implicit conversion.
 - Marked the Wisp delivery identity/dedup capability complete; no release tag

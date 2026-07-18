@@ -247,6 +247,7 @@ func (ts *TailSampler) Close() error {
 		remaining = append(remaining, pt)
 		delete(ts.pending, id)
 	}
+	ts.currentBytes = 0
 	ts.mu.Unlock()
 
 	for _, pt := range remaining {
