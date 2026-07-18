@@ -272,6 +272,7 @@ type TenantLimit struct {
 	MaxLogAttributeKeys    int
 	MaxMetricAttributes    int
 	MaxMetricAttributeKeys int
+	MaxMetricSeries        int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -884,6 +885,18 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 		if limit := s.tenantLimits[tenant].MaxMetricAttributeKeys; limit > 0 {
 			request := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rm}
 			if metricAttributeKeyCount(request, limit) > limit {
+				s.metricLimitRejected.Add(1)
+				return 0, "", errMetricAttributesTooMany
+			}
+		}
+		if limit := s.tenantLimits[tenant].MaxMetricSeries; limit > 0 {
+			series := 0
+			for _, resource := range rm {
+				for _, scope := range resource.GetScopeMetrics() {
+					series += len(scope.GetMetrics())
+				}
+			}
+			if series > limit {
 				s.metricLimitRejected.Add(1)
 				return 0, "", errMetricAttributesTooMany
 			}

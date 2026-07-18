@@ -207,7 +207,7 @@ func (a *App) addIngress(cfg config.ReceiversConfig, tenantMap map[string]string
 	security.JournalMaxBytes = journalMaxBytes
 	security.TenantLimits = make(map[string]otlprecv.TenantLimit, len(tenantLimits))
 	for name, limit := range tenantLimits {
-		security.TenantLimits[name] = otlprecv.TenantLimit{MaxItems: limit.MaxItems, MaxBytes: limit.MaxBytes, MaxConcurrent: limit.MaxConcurrent, MaxRequestsPerSecond: limit.MaxRequestsPerSecond, MaxLogRecordBytes: limit.MaxLogRecordBytes, MaxLogAttributes: limit.MaxLogAttributes, MaxLogAttributeKeys: limit.MaxLogAttributeKeys, MaxMetricAttributes: limit.MaxMetricAttributes, MaxMetricAttributeKeys: limit.MaxMetricAttributeKeys}
+		security.TenantLimits[name] = otlprecv.TenantLimit{MaxItems: limit.MaxItems, MaxBytes: limit.MaxBytes, MaxConcurrent: limit.MaxConcurrent, MaxRequestsPerSecond: limit.MaxRequestsPerSecond, MaxLogRecordBytes: limit.MaxLogRecordBytes, MaxLogAttributes: limit.MaxLogAttributes, MaxLogAttributeKeys: limit.MaxLogAttributeKeys, MaxMetricAttributes: limit.MaxMetricAttributes, MaxMetricAttributeKeys: limit.MaxMetricAttributeKeys, MaxMetricSeries: limit.MaxMetricSeries}
 	}
 	if cfg.OTLPGRPC != nil {
 		grpcAddr = cfg.OTLPGRPC.Endpoint

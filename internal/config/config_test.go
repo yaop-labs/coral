@@ -64,6 +64,9 @@ func TestTenantLimitBounds(t *testing.T) {
 	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_metric_attribute_keys: 1000001\n")); err == nil {
 		t.Fatal("accepted excessive metric attribute key limit")
 	}
+	if _, err := Parse([]byte("tenant_limits:\n  a:\n    max_metric_series: 1000001\n")); err == nil {
+		t.Fatal("accepted excessive metric series limit")
+	}
 }
 
 func validConfig() Config {

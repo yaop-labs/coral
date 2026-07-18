@@ -54,6 +54,7 @@ tenant_limits:
     max_log_attribute_keys: 4096
     max_metric_attributes: 4096
     max_metric_attribute_keys: 4096
+    max_metric_series: 10000
 ```
 
 ## Security
