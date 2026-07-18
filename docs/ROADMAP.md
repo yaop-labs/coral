@@ -502,9 +502,9 @@ explicit and documented.
 
 ## Increment 10 — metrics capability contract
 
-Implementation progress: tenant-bounded metric attribute admission is
-implemented with permanent pre-sink rejection; full per-series cardinality,
-temporality, and downstream Amber semantics remain.
+Implementation progress: tenant-bounded metric attribute count and distinct
+attribute-key admission are implemented with permanent pre-sink rejection;
+full per-series cardinality, temporality, and downstream Amber semantics remain.
 
 **Goal.** Admit metrics safely with bounded label cardinality and verified Amber
 time-series semantics.

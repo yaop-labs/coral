@@ -82,6 +82,38 @@ func metricAttributeCount(m proto.Message, limit int) int {
 	return count
 }
 
+func metricAttributeKeyCount(m proto.Message, limit int) int {
+	keys := make(map[string]struct{})
+	var walk func(protoreflect.Message)
+	walk = func(msg protoreflect.Message) {
+		msg.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+			if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+				return true
+			}
+			if fd.IsList() {
+				list := v.List()
+				for i := 0; i < list.Len(); i++ {
+					item := list.Get(i).Message()
+					if fd.Name() == "attributes" {
+						item.Range(func(kfd protoreflect.FieldDescriptor, kv protoreflect.Value) bool {
+							if kfd.Name() == "key" {
+								keys[kv.String()] = struct{}{}
+							}
+							return true
+						})
+					}
+					walk(item)
+				}
+			} else if !fd.IsMap() {
+				walk(v.Message())
+			}
+			return len(keys) <= limit
+		})
+	}
+	walk(m.ProtoReflect())
+	return len(keys)
+}
+
 const defaultMaxRecvBytes = 16 << 20
 
 // Sink holds the per-signal callbacks that hand an accepted batch to its
@@ -230,14 +262,15 @@ type SecurityConfig struct {
 }
 
 type TenantLimit struct {
-	MaxItems             int
-	MaxBytes             int64
-	MaxConcurrent        int
-	MaxRequestsPerSecond int
-	MaxLogRecordBytes    int
-	MaxLogAttributes     int
-	MaxLogAttributeKeys  int
-	MaxMetricAttributes  int
+	MaxItems               int
+	MaxBytes               int64
+	MaxConcurrent          int
+	MaxRequestsPerSecond   int
+	MaxLogRecordBytes      int
+	MaxLogAttributes       int
+	MaxLogAttributeKeys    int
+	MaxMetricAttributes    int
+	MaxMetricAttributeKeys int
 }
 
 type TenantCounters struct{ Accepted, Rejected, QuotaRejected uint64 }
@@ -842,6 +875,12 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 		if limit := s.tenantLimits[tenant].MaxMetricAttributes; limit > 0 {
 			request := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rm}
 			if metricAttributeCount(request, limit) > limit {
+				return 0, "", errMetricAttributesTooMany
+			}
+		}
+		if limit := s.tenantLimits[tenant].MaxMetricAttributeKeys; limit > 0 {
+			request := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: rm}
+			if metricAttributeKeyCount(request, limit) > limit {
 				return 0, "", errMetricAttributesTooMany
 			}
 		}
