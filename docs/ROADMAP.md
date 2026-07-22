@@ -208,9 +208,10 @@ Required work:
    rotation, required Amber, bounded journal/queues, self-observation
    protection, and explicit legacy listener policy is now checked by a config
    parse test. Rotation and runtime soak evidence remain.
-2. Publish a runbook for startup, readiness, journal pressure, quarantine,
-   downstream outage, credential rotation, graceful shutdown, backup/move of
-   journal state, and rollback.
+2. **In progress (runbook added):** startup, readiness, journal pressure,
+   quarantine, downstream outage, credential rotation, graceful shutdown,
+   backup/move of journal state, and rollback are documented in
+   `docs/RUNBOOK.md`; executable soak evidence remains.
 3. Add real current-Wisp → Coral → Amber and Coral → Fathom gates. Preserve the
    existing successful three-signal Coral-to-Fathom gate.
 4. Run race, lint, fuzz, deterministic package, crash matrix, and a sustained
