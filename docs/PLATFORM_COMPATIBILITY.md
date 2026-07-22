@@ -65,8 +65,10 @@ Readiness fails on journal pressure, retry/ack backlog, or non-empty quarantine.
 ### Legacy receivers
 
 Jaeger Thrift and Zipkin remain trace-only compatibility receivers. Their
-listeners do not use Reef edge policy. They are outside the production profile
-until they are protected or restricted to explicit loopback/insecure use.
+listeners do not use Reef edge policy. They are outside the production profile;
+if enabled for compatibility they must be bound to loopback behind an
+explicitly managed local edge. The S3 `jsonl` exporter is similarly a lossy
+derived format and is never a replacement for Amber's OTLP source of truth.
 
 ## Required release matrix
 

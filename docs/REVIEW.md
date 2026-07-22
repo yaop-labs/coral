@@ -86,6 +86,15 @@ trace fan-out, and journal replay. HTTP exporters emit it as the bounded
 `X-Coral-Tenant` routing header; S3 partitions objects by escaped tenant. Queue
 and exporter-lane metrics expose item/byte depth and stable destination labels.
 
+### Gate 3 — source-of-truth fidelity (in progress)
+
+The first slice adds a raw trace golden fixture covering trace state, events,
+links, schema URLs, and dropped counts; an all-OTLP-metric-types round-trip
+fixture covering temporality, monotonicity, and exemplars; and representative
+log resource/record preservation. Real Amber/Fathom process-pair verification,
+partial-success matrix through the pair, and release-profile enforcement remain
+open.
+
 ## Release blockers
 
 ## High-priority correctness work

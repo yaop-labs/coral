@@ -162,6 +162,11 @@ Closure evidence:
 
 ### Gate 3 — make the source-of-truth path lossless and protocol-correct
 
+Status: **in progress**. The first fidelity slice now has raw trace golden
+coverage, all OTLP metric-type preservation coverage, representative log
+resource/record coverage, and explicit downstream tenant-header assertions.
+The real Amber/Fathom pair and release policy gates remain open.
+
 Goal: Amber receives every supported field not intentionally transformed by a
 configured processor, and Coral understands Amber's response.
 
@@ -175,10 +180,13 @@ Required work:
 3. **Completed across Gate 1 and the re-baseline:** decode OTLP success bodies from
    Amber and Fathom for all signals and classify non-zero partial rejection as
    permanent failure; required Amber rejection is conservatively quarantined.
-4. Verify metric types, temporality, monotonicity, exemplars, logs, resource
-   attributes, and service identity against the current Amber implementation.
-5. Define the production position of legacy Jaeger/Zipkin listeners and the
-   S3 lossy trace format.
+4. **Slice covered:** verify metric types, temporality, monotonicity, exemplars,
+   logs, resource attributes, and service identity in Coral's OTLP contract;
+   real Amber compatibility remains open.
+5. **Policy selected:** legacy Jaeger/Zipkin listeners are excluded from the
+   production profile unless bound to loopback behind an explicitly managed
+   edge; S3 `jsonl` is an optional lossy derived export, never the source of
+   truth. Gate 4 must encode this policy in the production example/runbook.
 
 Verification:
 

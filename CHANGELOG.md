@@ -49,6 +49,9 @@ tested, documented increment.
   tenant identity propagates through async state to OTLP routing headers and
   tenant-scoped S3 prefixes; queue/lane metrics expose stable destination
   labels.
+- Began Gate 3: added golden raw-trace fidelity coverage, all OTLP metric-type
+  preservation coverage, representative log resource/record fixtures, and
+  explicit legacy-listener/S3 production policy boundaries.
 
 - Bounded per-tenant request-rate quotas (`max_requests_per_second`) with
   tenant-isolated rejection counters; concurrency quota accounting preserves

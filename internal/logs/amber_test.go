@@ -19,11 +19,13 @@ import (
 func TestAmberLogExporterExport(t *testing.T) {
 	var gotPath string
 	var got *collogspb.ExportLogsServiceRequest
+	var gotTenant string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		req := &collogspb.ExportLogsServiceRequest{}
 		_ = proto.Unmarshal(body, req)
 		gotPath = r.URL.Path
+		gotTenant = r.Header.Get("X-Coral-Tenant")
 		got = req
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -33,11 +35,12 @@ func TestAmberLogExporterExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new amber exporter: %v", err)
 	}
-	err = exp.Export(context.Background(), Batch{ResourceLogs: []*logspb.ResourceLogs{{
+	err = exp.Export(context.Background(), Batch{Tenant: "tenant-a", ResourceLogs: []*logspb.ResourceLogs{{
 		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "checkout")}},
 		ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{
 			TimeUnixNano: 1,
 			Body:         &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "payment timeout"}},
+			Attributes:   []*commonpb.KeyValue{stringKV("http.route", "/checkout")},
 		}}}},
 	}}})
 	if err != nil {
@@ -46,8 +49,15 @@ func TestAmberLogExporterExport(t *testing.T) {
 	if gotPath != "/v1/logs" {
 		t.Fatalf("path = %q, want /v1/logs", gotPath)
 	}
+	if gotTenant != "tenant-a" {
+		t.Fatalf("tenant header = %q, want tenant-a", gotTenant)
+	}
 	if got == nil || len(got.ResourceLogs) != 1 {
 		t.Fatalf("unexpected log request: %+v", got)
+	}
+	if got.ResourceLogs[0].GetResource().GetAttributes()[0].GetValue().GetStringValue() != "checkout" ||
+		got.ResourceLogs[0].GetScopeLogs()[0].GetLogRecords()[0].GetAttributes()[0].GetValue().GetStringValue() != "/checkout" {
+		t.Fatalf("log resource/record attributes were not preserved: %+v", got)
 	}
 }
 

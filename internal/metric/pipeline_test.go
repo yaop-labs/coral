@@ -161,3 +161,37 @@ func TestMetricExporterPartialSuccessIsNotDelivery(t *testing.T) {
 		t.Fatal("partial success was treated as complete delivery")
 	}
 }
+
+func TestAmberMetricExporterPreservesAllOTLPMetricTypes(t *testing.T) {
+	var got *colmetricspb.ExportMetricsServiceRequest
+	var tenant string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = &colmetricspb.ExportMetricsServiceRequest{}
+		_ = proto.Unmarshal(body, got)
+		tenant = r.Header.Get("X-Coral-Tenant")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	exporter, err := NewAmberExporter(server.URL, time.Second, RetryPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := []*metricspb.Metric{
+		{Name: "gauge", Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{TimeUnixNano: 1}}}}},
+		{Name: "sum", Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{IsMonotonic: true, AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, DataPoints: []*metricspb.NumberDataPoint{{TimeUnixNano: 2}}}}},
+		{Name: "histogram", Data: &metricspb.Metric_Histogram{Histogram: &metricspb.Histogram{AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, DataPoints: []*metricspb.HistogramDataPoint{{TimeUnixNano: 3, Count: 4, ExplicitBounds: []float64{1, 2}, BucketCounts: []uint64{2, 2}}}}}},
+		{Name: "exponential", Data: &metricspb.Metric_ExponentialHistogram{ExponentialHistogram: &metricspb.ExponentialHistogram{AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA, DataPoints: []*metricspb.ExponentialHistogramDataPoint{{TimeUnixNano: 4, Count: 5, Scale: 2}}}}},
+		{Name: "summary", Data: &metricspb.Metric_Summary{Summary: &metricspb.Summary{DataPoints: []*metricspb.SummaryDataPoint{{TimeUnixNano: 5, Count: 6, Sum: 7, QuantileValues: []*metricspb.SummaryDataPoint_ValueAtQuantile{{Quantile: .5, Value: 7}}}}}}},
+	}
+	want := &colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		Resource:     &resourcepb.Resource{Attributes: []*commonpb.KeyValue{stringKV("service.name", "all-types")}},
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: metrics}},
+	}}}
+	if err := exporter.Export(context.Background(), Batch{ResourceMetrics: want.ResourceMetrics, Tenant: "tenant-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if tenant != "tenant-a" || got == nil || !proto.Equal(got, want) {
+		t.Fatalf("metric fidelity/routing mismatch: tenant=%q got=%v want=%v", tenant, got, want)
+	}
+}
