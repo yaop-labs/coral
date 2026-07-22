@@ -217,9 +217,10 @@ Required work:
 4. **Verified so far:** full tests, race suite, config fuzz (222,220 execs),
    deterministic Linux/amd64 package, and SHA-256 checksum pass on the current
    commit. Lint is blocked by the local golangci-lint context-loading issue;
-   journal crash/replay matrix passes. A Wisp→Coral→Amber soak was executed;
-   it exposed 15 unrecoverable metric failures when using the non-journal Gate
-   3 harness, so the durable production-profile soak remains a release blocker.
+   journal crash/replay matrix passes. The durable Wisp→Coral→Amber soak now
+   passes: the journal grew during Amber outage and drained to zero after
+   recovery, with Amber accepting the recovered samples. The non-journal Gate 3
+   harness remains intentionally unsuitable for outage testing.
 5. Reconcile README, compatibility matrix, example configs, changelog, and
    build metadata. `Unreleased` must describe the actual increment.
 6. **Pending release decision:** choose the version from the delivered compatibility and migration impact,

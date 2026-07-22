@@ -1,0 +1,24 @@
+journal_path: "/tmp/coral-gate4-journal"
+journal_max_bytes: 67108864
+pipeline:
+  workers: 1
+  queue_size: 128
+  queue_bytes: 16777216
+receivers:
+  otlp_http:
+    endpoint: "127.0.0.1:4320"
+    insecure: true
+exporters:
+  - type: amber
+    endpoint: "http://127.0.0.1:8080"
+    insecure: true
+    timeout: 2s
+    retry:
+      max_attempts: 5
+      initial_backoff: 50ms
+      max_backoff: 500ms
+metric_pipeline:
+  exporter:
+    type: amber
+    endpoint: "http://127.0.0.1:8080"
+    insecure: true

@@ -15,6 +15,8 @@ tested, documented increment.
 - Gate 4 soak: real Wisp→Coral→Amber traffic was exercised; the non-journal
   harness exposed unrecoverable failures during Amber outage and is not a
   release acceptance result.
+- Gate 4 soak: the durable-journal profile now passes Amber outage/recovery;
+  journal pressure drains to zero after downstream recovery.
 
 - Gate 3: add a loopback Amber real-pair smoke configuration and OTLP JSON
   fixtures proving trace, metric, and log admission through Coral.
