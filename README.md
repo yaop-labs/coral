@@ -126,14 +126,4 @@ make fuzz
 
 Release packages are deterministic `.tar.gz` archives built by
 `scripts/package.sh`; tag builds publish archives and `SHA256SUMS` only after
-the release gate passes. Coral has not cut a release tag yet. The consolidated
-engineering history, current review, responsibility boundaries, and stable
-stabilization plan are in
-[`docs/HISTORY.md`](docs/HISTORY.md),
-[`docs/REVIEW.md`](docs/REVIEW.md),
-[`ADR 0001`](docs/adr/0001-coral-role-and-boundaries.md), and
-[`docs/ROADMAP.md`](docs/ROADMAP.md). Cross-repository Gyre/Reef/Wisp boundaries
-are explicit in
-[`docs/PLATFORM_COMPATIBILITY.md`](docs/PLATFORM_COMPATIBILITY.md).
-The Reef v0.3 fail-closed migration is documented in
-[`docs/REEF_V0.3_MIGRATION.md`](docs/REEF_V0.3_MIGRATION.md).
+the release gate passes. The current beta release is `v0.1.0-beta.1`.
