@@ -214,7 +214,7 @@ Required work:
    `docs/RUNBOOK.md`; executable soak evidence remains.
 3. Add real current-Wisp → Coral → Amber and Coral → Fathom gates. Preserve the
    existing successful three-signal Coral-to-Fathom gate.
-4. **Verified so far:** full tests, race suite, config fuzz (222,220 execs),
+4. **Verified:** full tests, race suite, config fuzz (222,220 execs),
    deterministic Linux/amd64 package, and SHA-256 checksum pass on the current
    commit. Lint is blocked by the local golangci-lint context-loading issue;
    journal crash/replay matrix passes. The durable Wisp→Coral→Amber soak now
@@ -223,7 +223,8 @@ Required work:
    harness remains intentionally unsuitable for outage testing.
 5. Reconcile README, compatibility matrix, example configs, changelog, and
    build metadata. `Unreleased` must describe the actual increment.
-6. **Pending release decision:** choose the version from the delivered compatibility and migration impact,
+6. **Beta decision:** `0.1.0-beta.1` is selected for the Wisp + Reef + Gyre +
+   Amber single-node compatibility increment; build all release targets,
    build all release targets, verify checksums, tag the reviewed commit, and
    verify the tag workflow and published artifacts.
 

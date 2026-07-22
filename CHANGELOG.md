@@ -4,7 +4,7 @@ All notable Coral capability increments are documented here. Coral does not use
 version numbers as a countdown to v1.0; a release is cut only for a complete,
 tested, documented increment.
 
-## Unreleased
+## 0.1.0-beta.1 — 2026-07-22
 
 - Gate 4: add a Reef-backed production profile with TLS/mTLS, bearer files,
   bounded journal/queues, protected self-observation, and no legacy listeners.
