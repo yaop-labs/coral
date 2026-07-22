@@ -9,6 +9,7 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 
@@ -24,12 +25,27 @@ func toTraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
 	var order []string
 	for i := range b.Spans {
 		s := &b.Spans[i]
-		key := resourceKey(s.Resource)
+		scopeSchema := firstNonEmpty(s.ScopeSchemaURL, s.SchemaURL)
+		key := resourceKey(s.Resource) + "\x00" + s.ResourceSchemaURL + "\x00" +
+			s.ScopeName + "\x00" + s.ScopeVersion + "\x00" + scopeSchema + "\x00" +
+			attributesKey(s.ScopeAttributes)
 		rs := groups[key]
 		if rs == nil {
 			rs = &tracepb.ResourceSpans{
-				Resource:   &resourcepb.Resource{Attributes: kvFromAttrs(s.Resource.Attrs)},
-				ScopeSpans: []*tracepb.ScopeSpans{{Scope: &commonpb.InstrumentationScope{Name: scopeName}}},
+				Resource: &resourcepb.Resource{
+					Attributes:             kvFromAttrs(s.Resource.Attrs),
+					DroppedAttributesCount: s.Resource.DroppedAttributes,
+				},
+				SchemaUrl: s.ResourceSchemaURL,
+				ScopeSpans: []*tracepb.ScopeSpans{{
+					Scope: &commonpb.InstrumentationScope{
+						Name:                   firstNonEmpty(s.ScopeName, scopeName),
+						Version:                s.ScopeVersion,
+						Attributes:             kvFromAttrs(s.ScopeAttributes),
+						DroppedAttributesCount: s.ScopeDroppedAttrs,
+					},
+					SchemaUrl: scopeSchema,
+				}},
 			}
 			groups[key] = rs
 			order = append(order, key)
@@ -43,21 +59,43 @@ func toTraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
 	return req
 }
 
+// TraceRequest returns the canonical OTLP representation of an admitted trace
+// batch. Ingress uses the same lossless conversion for durable post-admission
+// journal records that the Amber exporter uses on live delivery.
+func TraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
+	return toTraceRequest(b)
+}
+
 func spanToProto(s *model.Span) *tracepb.Span {
-	sp := &tracepb.Span{
-		TraceId:           append([]byte(nil), s.TraceID[:]...),
-		SpanId:            append([]byte(nil), s.SpanID[:]...),
-		Name:              s.Name,
-		Kind:              kindToProto(s.Kind),
-		StartTimeUnixNano: timeToNanos(s.StartTime),
-		EndTimeUnixNano:   timeToNanos(s.EndTime),
-		Attributes:        kvFromAttrs(s.Attrs),
-		Status:            &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg},
+	sp := &tracepb.Span{}
+	if len(s.OTLP) > 0 {
+		_ = proto.Unmarshal(s.OTLP, sp)
 	}
+	sp.TraceId = append([]byte(nil), s.TraceID[:]...)
+	sp.SpanId = append([]byte(nil), s.SpanID[:]...)
+	sp.Name = s.Name
+	sp.Kind = kindToProto(s.Kind)
+	sp.StartTimeUnixNano = timeToNanos(s.StartTime)
+	sp.EndTimeUnixNano = timeToNanos(s.EndTime)
+	sp.Attributes = kvFromAttrs(s.Attrs)
+	sp.Status = &tracepb.Status{Code: statusToProto(s.Status), Message: s.StatusMsg}
+	sp.Flags = s.TraceFlags
+	sp.DroppedAttributesCount = s.DroppedAttributes
+	sp.DroppedEventsCount = s.DroppedEvents
+	sp.DroppedLinksCount = s.DroppedLinks
 	if !s.ParentSpanID.IsZero() {
 		sp.ParentSpanId = append([]byte(nil), s.ParentSpanID[:]...)
+	} else {
+		sp.ParentSpanId = nil
 	}
 	return sp
+}
+
+func firstNonEmpty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func kindToProto(k model.SpanKind) tracepb.Span_SpanKind {
@@ -138,7 +176,11 @@ func anyFromGo(x any) *commonpb.AnyValue {
 }
 
 func resourceKey(r model.Resource) string {
-	attrs := append([]model.Attribute(nil), r.Attrs...)
+	return attributesKey(r.Attrs) + fmt.Sprintf("\x00%d", r.DroppedAttributes)
+}
+
+func attributesKey(input []model.Attribute) string {
+	attrs := append([]model.Attribute(nil), input...)
 	sort.Slice(attrs, func(i, j int) bool { return attrs[i].Key < attrs[j].Key })
 	var b strings.Builder
 	for _, a := range attrs {

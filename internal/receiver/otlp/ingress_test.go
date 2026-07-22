@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,8 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 
+	"github.com/yaop-labs/coral/internal/delivery"
+	"github.com/yaop-labs/coral/internal/journal"
 	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
 	"github.com/yaop-labs/coral/internal/model"
@@ -640,5 +643,164 @@ func TestIngress_UnservedSignal(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("POST /v1/metrics on traces-only ingress: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestDurableAdmissionPrecedesPipelineAndRetainsEnqueueFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admission.journal")
+	wantErr := errors.New("queue unavailable")
+	s, err := NewSecureServer("", "", 0, Sink{
+		Traces: func(context.Context, model.Batch) error { return wantErr },
+	}, SecurityConfig{JournalPath: path, JournalMaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.journal.Close()
+
+	req := traceReq()
+	_, _, err = s.admitTraces(context.Background(), spansFromResourceSpans(req.GetResourceSpans()))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("admit error = %v, want queue failure", err)
+	}
+	bytes, _ := s.JournalStats()
+	if bytes == 0 {
+		t.Fatal("pipeline failure lost the already admitted journal record")
+	}
+	var env journal.Envelope
+	if err := s.journal.Replay(func(raw []byte) error {
+		env, err = journal.DecodeEnvelope(raw)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if env.RecordID == "" {
+		t.Fatal("durable admission did not assign a record id")
+	}
+}
+
+func TestDeliveryConfirmationAcknowledgesOnlyAllRegisteredUnits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admission.journal")
+	s, err := NewSecureServer("", "", 0, Sink{
+		Traces: func(context.Context, model.Batch) error { return nil },
+	}, SecurityConfig{JournalPath: path, JournalMaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.journal.Close()
+
+	stored, err := s.journal.AppendEnvelope(journal.Envelope{Signal: "traces", Payload: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.TrackJournalRecord(stored.RecordID, 2)
+	s.DeliveryConfirmed(delivery.Metadata{Records: []delivery.RecordContribution{{RecordID: stored.RecordID, Units: 1}}})
+	if bytes, _ := s.JournalStats(); bytes == 0 {
+		t.Fatal("record acknowledged after only its first child")
+	}
+	s.DeliveryConfirmed(delivery.Metadata{Records: []delivery.RecordContribution{{RecordID: stored.RecordID, Units: 1}}})
+	if bytes, _ := s.JournalStats(); bytes != 0 {
+		t.Fatalf("confirmed record retained: %d bytes", bytes)
+	}
+}
+
+func TestDeliveryConfirmationIgnoresStaleRedispatchAttempt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admission.journal")
+	s, err := NewSecureServer("", "", 0, Sink{}, SecurityConfig{JournalPath: path, JournalMaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.CloseJournal()
+
+	stored, err := s.journal.AppendEnvelope(journal.Envelope{Signal: "traces", Payload: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := s.TrackJournalRecord(stored.RecordID, 1)
+	s.DeliveryConfirmed(delivery.Metadata{Records: []delivery.RecordContribution{{
+		RecordID: stored.RecordID, Attempt: attempt + 1, Units: 1,
+	}}})
+	if bytes, _ := s.JournalStats(); bytes == 0 {
+		t.Fatal("stale exporter completion acknowledged the current attempt")
+	}
+	s.DeliveryConfirmed(delivery.Metadata{Records: []delivery.RecordContribution{{
+		RecordID: stored.RecordID, Attempt: attempt, Units: 1,
+	}}})
+	if bytes, _ := s.JournalStats(); bytes != 0 {
+		t.Fatalf("current exporter completion retained record: %d bytes", bytes)
+	}
+}
+
+func TestHTTPDedupUsesCanonicalPayloadAcrossEncodings(t *testing.T) {
+	c := &capture{}
+	s := NewServer("", "", 0, c.sink())
+	id := "0123456789abcdef0123456789abcdef"
+
+	jsonBody, err := protojson.Marshal(traceReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonReq := httptest.NewRequest(http.MethodPost, "/v1/traces", bytes.NewReader(jsonBody))
+	jsonReq.Header.Set("Content-Type", "application/json")
+	jsonReq.Header.Set("x-wisp-envelope-id", id)
+	jsonReq.Header.Set("x-wisp-signal-kind", "traces")
+	jsonResponse := httptest.NewRecorder()
+	s.handleTraces(jsonResponse, jsonReq)
+	if jsonResponse.Code != http.StatusOK {
+		t.Fatalf("JSON request = %d: %s", jsonResponse.Code, jsonResponse.Body.String())
+	}
+
+	protoBody, err := proto.Marshal(traceReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protoReq := httptest.NewRequest(http.MethodPost, "/v1/traces", bytes.NewReader(protoBody))
+	protoReq.Header.Set("Content-Type", "application/x-protobuf")
+	protoReq.Header.Set("x-wisp-envelope-id", id)
+	protoReq.Header.Set("x-wisp-signal-kind", "traces")
+	protoResponse := httptest.NewRecorder()
+	s.handleTraces(protoResponse, protoReq)
+	if protoResponse.Code != http.StatusOK {
+		t.Fatalf("protobuf retry = %d: %s", protoResponse.Code, protoResponse.Body.String())
+	}
+	if traces, _, _ := c.counts(); traces != 1 {
+		t.Fatalf("canonical duplicate reached the sink: traces=%d, want 1", traces)
+	}
+	if hits, _, _, _ := s.DedupStats(); hits != 1 {
+		t.Fatalf("dedup hits = %d, want 1", hits)
+	}
+}
+
+func TestJournalStoresCanonicalPostAdmissionTracePayload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admission.journal")
+	sink := Sink{
+		Traces:     func(context.Context, model.Batch) error { return nil },
+		TraceAdmit: rejectNamed,
+	}
+	s, err := NewSecureServer("", "", 0, sink, SecurityConfig{JournalPath: path, JournalMaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.journal.Close()
+
+	req := twoSpanReq()
+	rejected, _, err := s.admitTraces(context.Background(), spansFromResourceSpans(req.GetResourceSpans()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected != 1 {
+		t.Fatalf("rejected = %d, want 1", rejected)
+	}
+	var replay coltracepb.ExportTraceServiceRequest
+	if err := s.journal.Replay(func(raw []byte) error {
+		env, err := journal.DecodeEnvelope(raw)
+		if err != nil {
+			return err
+		}
+		return proto.Unmarshal(env.Payload, &replay)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(spansFromResourceSpans(replay.GetResourceSpans())); got != 1 {
+		t.Fatalf("journaled admitted spans = %d, want 1", got)
 	}
 }

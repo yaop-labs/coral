@@ -4,7 +4,11 @@ import (
 	"context"
 	"regexp"
 
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/yaop-labs/coral/internal/model"
+	"github.com/yaop-labs/coral/internal/otlpredact"
 )
 
 const (
@@ -19,6 +23,7 @@ const (
 type ValidateProcessor struct {
 	maxSpanBytes int
 	patterns     []*regexp.Regexp
+	otlpRedactor *otlpredact.Redactor
 
 	dropped  uint64
 	redacted uint64
@@ -36,7 +41,11 @@ func NewValidate(maxSpanBytes int, patterns []string) (*ValidateProcessor, error
 	if maxSpanBytes <= 0 {
 		maxSpanBytes = 64 * 1024
 	}
-	return &ValidateProcessor{maxSpanBytes: maxSpanBytes, patterns: compiled}, nil
+	redactor, err := otlpredact.New(patterns)
+	if err != nil {
+		return nil, err
+	}
+	return &ValidateProcessor{maxSpanBytes: maxSpanBytes, patterns: compiled, otlpRedactor: redactor}, nil
 }
 
 func (v *ValidateProcessor) Process(_ context.Context, b model.Batch) (model.Batch, error) {
@@ -75,6 +84,33 @@ func (v *ValidateProcessor) redact(s *model.Span) {
 	// attributes may be shared, so redactAttrs clones them on the first hit.
 	s.Attrs = v.redactAttrs(s.Attrs, false)
 	s.Resource.Attrs = v.redactAttrs(s.Resource.Attrs, true)
+	v.redactNestedOTLP(s)
+}
+
+func (v *ValidateProcessor) redactNestedOTLP(s *model.Span) {
+	if len(s.OTLP) == 0 || v.otlpRedactor == nil || !v.otlpRedactor.Enabled() {
+		return
+	}
+	var raw tracepb.Span
+	if err := proto.Unmarshal(s.OTLP, &raw); err != nil {
+		return
+	}
+	changed := 0
+	for _, event := range raw.GetEvents() {
+		changed += v.otlpRedactor.RedactKeyValues(event.GetAttributes())
+	}
+	for _, link := range raw.GetLinks() {
+		changed += v.otlpRedactor.RedactKeyValues(link.GetAttributes())
+	}
+	if changed == 0 {
+		return
+	}
+	encoded, err := proto.Marshal(&raw)
+	if err != nil {
+		return
+	}
+	s.OTLP = encoded
+	v.redacted += uint64(changed)
 }
 
 func (v *ValidateProcessor) redactAttrs(attrs []model.Attribute, shared bool) []model.Attribute {

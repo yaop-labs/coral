@@ -3,6 +3,7 @@ package otlp
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,19 +43,18 @@ func newDedupWindow(max int, ttl time.Duration) *dedupWindow {
 }
 
 func (d *dedupWindow) check(tenant, signal, id string, payload []byte) dedupResult {
-	return d.checkLocked(tenant, signal, id, payload, true)
+	return d.checkDigest(tenant, signal, id, sha256.Sum256(payload), true)
 }
 
 func (d *dedupWindow) lookup(tenant, signal, id string, payload []byte) dedupResult {
-	return d.checkLocked(tenant, signal, id, payload, false)
+	return d.checkDigest(tenant, signal, id, sha256.Sum256(payload), false)
 }
 
-func (d *dedupWindow) checkLocked(tenant, signal, id string, payload []byte, remember bool) dedupResult {
+func (d *dedupWindow) checkDigest(tenant, signal, id string, hash [32]byte, remember bool) dedupResult {
 	if id == "" {
 		return dedupNew
 	}
 	key := tenant + "\x00" + signal + "\x00" + id
-	hash := sha256.Sum256(payload)
 	now := d.now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -87,6 +87,17 @@ func (d *dedupWindow) Evictions() uint64 { return d.evictions.Load() }
 
 func (d *dedupWindow) remember(tenant, signal, id string, payload []byte) {
 	_ = d.check(tenant, signal, id, payload)
+}
+
+func (d *dedupWindow) rememberDigest(tenant, signal, id, digest string) error {
+	raw, err := hex.DecodeString(digest)
+	if err != nil || len(raw) != sha256.Size {
+		return errors.New("invalid delivery receipt digest")
+	}
+	var hash [sha256.Size]byte
+	copy(hash[:], raw)
+	_ = d.checkDigest(tenant, signal, id, hash, true)
+	return nil
 }
 
 func (r dedupResult) String() string {

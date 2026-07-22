@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +30,9 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 
+	"github.com/yaop-labs/coral/internal/delivery"
+	amberexp "github.com/yaop-labs/coral/internal/exporter/amber"
+	"github.com/yaop-labs/coral/internal/exporter/backoff"
 	"github.com/yaop-labs/coral/internal/journal"
 	"github.com/yaop-labs/coral/internal/logs"
 	"github.com/yaop-labs/coral/internal/metric"
@@ -185,20 +190,37 @@ func quotaExceeded(ctx context.Context, limits map[string]TenantLimit, items int
 // (contract §2). It replaces the former per-signal receivers so a stock OTel
 // SDK — which sends every signal to a single endpoint — just works.
 type Server struct {
-	grpcAddr       string
-	httpAddr       string
-	maxRecv        int
-	sink           Sink
-	tenantMap      map[string]string
-	tenantLimits   map[string]TenantLimit
-	tenantStatsMu  sync.Mutex
-	tenantStats    map[string]TenantCounters
-	tenantInFlight map[string]int
-	tenantRate     map[string][]time.Time
-	dedup          *dedupWindow
-	journal        *journal.Journal
-	grpcSecurity   edge.ServerConfig
-	httpSecurity   edge.ServerConfig
+	grpcAddr        string
+	httpAddr        string
+	maxRecv         int
+	sink            Sink
+	tenantMap       map[string]string
+	tenantLimits    map[string]TenantLimit
+	tenantStatsMu   sync.Mutex
+	tenantStats     map[string]TenantCounters
+	tenantInFlight  map[string]int
+	tenantRate      map[string][]time.Time
+	dedup           *dedupWindow
+	journal         *journal.Journal
+	quarantine      *journal.Journal
+	receipts        *journal.Journal
+	deliveryMu      sync.Mutex
+	journalPending  map[string]pendingDelivery
+	journalReady    map[string]struct{}
+	journalReplay   bool
+	deliveryAttempt atomic.Uint64
+	journalRetry    map[string]retryDelivery
+	retryInitial    time.Duration
+	retryMax        time.Duration
+	retryWake       chan struct{}
+	retryCancel     context.CancelFunc
+	retryWG         sync.WaitGroup
+	journalAckMu    sync.Mutex
+	journalAckErrs  atomic.Uint64
+	journalClose    sync.Once
+	journalCloseErr error
+	grpcSecurity    edge.ServerConfig
+	httpSecurity    edge.ServerConfig
 
 	grpcSrv       *grpc.Server
 	httpSrv       *http.Server
@@ -227,6 +249,23 @@ type Server struct {
 	dedupHits           atomic.Uint64
 	dedupConflicts      atomic.Uint64
 	dedupMisses         atomic.Uint64
+	redispatchAttempts  atomic.Uint64
+	redispatchSuccesses atomic.Uint64
+	redispatchFailures  atomic.Uint64
+	quarantinedTotal    atomic.Uint64
+}
+
+type pendingDelivery struct {
+	attempt   uint64
+	remaining int
+}
+
+type retryDelivery struct {
+	attempts  uint64
+	due       time.Time
+	inFlight  bool
+	permanent bool
+	reason    string
 }
 
 type deliveryIDContextKey struct{}
@@ -244,6 +283,18 @@ func deliveryIDFromContext(ctx context.Context) string {
 		return ""
 	}
 	return firstMetadata(md, "x-wisp-envelope-id")
+}
+
+func normalizedDeliveryID(ctx context.Context, signal string) string {
+	id := deliveryIDFromContext(ctx)
+	if id == "" {
+		return ""
+	}
+	identity, err := parseWispHeaders(id, signal)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(identity.EnvelopeID[:])
 }
 
 // NewServer builds an ingress bound to grpcAddr and/or httpAddr (either may be
@@ -391,12 +442,23 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		}
 		logEdgeWarnings("http", warnings)
 	}
-	var admissionJournal *journal.Journal
+	var admissionJournal, quarantineJournal, receiptJournal *journal.Journal
 	var journalErr error
 	if security.JournalPath != "" {
 		admissionJournal, journalErr = journal.Open(security.JournalPath, security.JournalMaxBytes)
 		if journalErr != nil {
 			return nil, fmt.Errorf("journal: %w", journalErr)
+		}
+		quarantineJournal, journalErr = journal.Open(security.JournalPath+".quarantine", security.JournalMaxBytes)
+		if journalErr != nil {
+			_ = admissionJournal.Close()
+			return nil, fmt.Errorf("quarantine journal: %w", journalErr)
+		}
+		receiptJournal, journalErr = journal.Open(security.JournalPath+".receipts", security.JournalMaxBytes)
+		if journalErr != nil {
+			_ = quarantineJournal.Close()
+			_ = admissionJournal.Close()
+			return nil, fmt.Errorf("receipt journal: %w", journalErr)
 		}
 	}
 	return &Server{
@@ -410,7 +472,15 @@ func newServer(grpcAddr, httpAddr string, maxRecvBytes int, sink Sink, security 
 		tenantInFlight: make(map[string]int),
 		tenantRate:     make(map[string][]time.Time),
 		journal:        admissionJournal,
+		quarantine:     quarantineJournal,
+		receipts:       receiptJournal,
 		dedup:          newDedupWindow(100000, 15*time.Minute),
+		journalPending: make(map[string]pendingDelivery),
+		journalReady:   make(map[string]struct{}),
+		journalRetry:   make(map[string]retryDelivery),
+		retryInitial:   200 * time.Millisecond,
+		retryMax:       5 * time.Second,
+		retryWake:      make(chan struct{}, 1),
 		grpcSecurity:   security.GRPC,
 		httpSecurity:   security.HTTP,
 		ready:          make(chan struct{}),
@@ -439,6 +509,14 @@ func firstMetadata(md metadata.MD, key string) string {
 	return v[0]
 }
 
+func (s *Server) dedupTenant(ctx context.Context) string {
+	principal, _ := bearer.PrincipalFromContext(ctx)
+	if mapped, ok := s.tenantMap[principal]; ok && mapped != "" {
+		return mapped
+	}
+	return principal
+}
+
 func (s *Server) dedupGRPC(ctx context.Context, signal string, payload proto.Message) (dedupResult, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 	id := firstMetadata(md, "x-wisp-envelope-id")
@@ -449,8 +527,8 @@ func (s *Server) dedupGRPC(ctx context.Context, signal string, payload proto.Mes
 	if err != nil {
 		return dedupNew, err
 	}
-	principal, _ := bearer.PrincipalFromContext(ctx)
-	result := s.dedup.lookup(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload))
+	tenant := s.dedupTenant(ctx)
+	result := s.dedup.lookup(tenant, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload))
 	if result == dedupHit {
 		s.dedupHits.Add(1)
 	}
@@ -473,8 +551,7 @@ func (s *Server) rememberGRPC(ctx context.Context, signal string, payload proto.
 	if err != nil {
 		return
 	}
-	principal, _ := bearer.PrincipalFromContext(ctx)
-	s.dedup.remember(principal, signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload))
+	s.dedup.remember(s.dedupTenant(ctx), signal, hex.EncodeToString(identity.EnvelopeID[:]), mustMarshal(payload))
 }
 
 func mustMarshal(m proto.Message) []byte { b, _ := proto.Marshal(m); return b }
@@ -496,9 +573,8 @@ func (s *Server) dedupHTTP(req *http.Request, signal string, body []byte) (dedup
 	if err != nil {
 		return dedupNew, "", err
 	}
-	principal, _ := bearer.PrincipalFromContext(req.Context())
 	key := hex.EncodeToString(identity.EnvelopeID[:])
-	result := s.dedup.lookup(principal, signal, key, body)
+	result := s.dedup.lookup(s.dedupTenant(req.Context()), signal, key, body)
 	if result == dedupHit {
 		s.dedupHits.Add(1)
 	}
@@ -515,13 +591,12 @@ func (s *Server) rememberHTTP(req *http.Request, signal, key string, body []byte
 	if key == "" {
 		return
 	}
-	principal, _ := bearer.PrincipalFromContext(req.Context())
-	s.dedup.remember(principal, signal, key, body)
+	s.dedup.remember(s.dedupTenant(req.Context()), signal, key, body)
 }
 
-func (s *Server) appendAdmission(ctx context.Context, signal string, payload []byte) error {
+func (s *Server) appendAdmission(ctx context.Context, signal string, payload, requestPayload []byte, units int) (journal.Envelope, uint64, error) {
 	if s.journal == nil {
-		return nil
+		return journal.Envelope{}, 0, nil
 	}
 	tenant, _ := TenantFromContext(ctx)
 	if tenant == "" {
@@ -531,11 +606,229 @@ func (s *Server) appendAdmission(ctx context.Context, signal string, payload []b
 			tenant = mapped
 		}
 	}
-	record := journal.EncodeEnvelope(journal.Envelope{Signal: signal, Tenant: tenant, DeliveryID: deliveryIDFromContext(ctx), Payload: payload, CreatedUnixNano: time.Now().UnixNano()})
-	if record == nil {
-		return journal.ErrEnvelopeTooLarge
+	if len(requestPayload) == 0 {
+		requestPayload = payload
 	}
-	return s.journal.Append(record)
+	env, err := s.journal.AppendEnvelope(journal.Envelope{
+		Signal: signal, Tenant: tenant, DeliveryID: normalizedDeliveryID(ctx, signal),
+		RequestDigest: digestHex(requestPayload), Payload: payload, CreatedUnixNano: time.Now().UnixNano(),
+	})
+	if err != nil {
+		return journal.Envelope{}, 0, err
+	}
+	attempt := s.TrackJournalRecord(env.RecordID, units)
+	return env, attempt, nil
+}
+
+// TrackJournalRecord registers the number of terminal signal items expected
+// before recordID can be acknowledged. It is exported for startup replay.
+func (s *Server) TrackJournalRecord(recordID string, units int) uint64 {
+	if recordID == "" || units <= 0 {
+		return 0
+	}
+	attempt := s.deliveryAttempt.Add(1)
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	s.journalPending[recordID] = pendingDelivery{attempt: attempt, remaining: units}
+	return attempt
+}
+
+// DeliveryConfirmed consumes item-level completion only after every required
+// destination accepted the exporter batch. Stateful processors may split one
+// journal record across several callbacks; the record is acknowledged only
+// when all registered units are terminal.
+func (s *Server) DeliveryConfirmed(meta delivery.Metadata) {
+	if s.journal == nil || len(meta.Records) == 0 {
+		return
+	}
+	s.deliveryMu.Lock()
+	for _, contribution := range meta.Records {
+		pending, exists := s.journalPending[contribution.RecordID]
+		if !exists || contribution.Units <= 0 || (contribution.Attempt != 0 && contribution.Attempt != pending.attempt) {
+			continue
+		}
+		pending.remaining -= contribution.Units
+		if pending.remaining > 0 {
+			s.journalPending[contribution.RecordID] = pending
+			continue
+		}
+		delete(s.journalPending, contribution.RecordID)
+		delete(s.journalRetry, contribution.RecordID)
+		s.journalReady[contribution.RecordID] = struct{}{}
+	}
+	replaying := s.journalReplay
+	s.deliveryMu.Unlock()
+	if !replaying {
+		s.flushJournalAcknowledgements()
+	}
+}
+
+// DeliveryFailed retains required-destination failures for bounded live
+// redispatch. Permanent protocol failures are moved to durable quarantine by
+// the same single worker, keeping exporter goroutines free of disk rewrites.
+func (s *Server) DeliveryFailed(meta delivery.Metadata, cause error) {
+	if s.journal == nil || cause == nil {
+		return
+	}
+	permanent := backoff.IsPermanent(cause)
+	reason := durableFailureReason(cause)
+	now := time.Now()
+	s.deliveryMu.Lock()
+	for _, contribution := range meta.Records {
+		pending, exists := s.journalPending[contribution.RecordID]
+		if !exists || (contribution.Attempt != 0 && contribution.Attempt != pending.attempt) {
+			continue
+		}
+		entry := s.journalRetry[contribution.RecordID]
+		entry.inFlight = false
+		entry.permanent = permanent
+		entry.reason = reason
+		if permanent {
+			entry.due = now
+		} else {
+			entry.attempts++
+			entry.due = now.Add(s.retryDelay(entry.attempts))
+		}
+		s.journalRetry[contribution.RecordID] = entry
+	}
+	s.deliveryMu.Unlock()
+	s.wakeRetryWorker()
+}
+
+func durableFailureReason(err error) string {
+	if err == nil {
+		return "unknown required delivery failure"
+	}
+	reason := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, err.Error())
+	if len(reason) > 1024 {
+		reason = reason[:1024]
+	}
+	return reason
+}
+
+func (s *Server) retryDelay(attempt uint64) time.Duration {
+	delay := s.retryInitial
+	if delay <= 0 {
+		delay = 200 * time.Millisecond
+	}
+	maxDelay := s.retryMax
+	if maxDelay < delay {
+		maxDelay = delay
+	}
+	for i := uint64(1); i < attempt && delay < maxDelay; i++ {
+		if delay > maxDelay/2 {
+			delay = maxDelay
+			break
+		}
+		delay *= 2
+	}
+	if delay <= 1 {
+		return delay
+	}
+	half := int64(delay) / 2
+	return time.Duration(int64(delay) - half + rand.Int64N(half+1))
+}
+
+func (s *Server) wakeRetryWorker() {
+	select {
+	case s.retryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) beginJournalReplay() {
+	s.deliveryMu.Lock()
+	s.journalReplay = true
+	s.deliveryMu.Unlock()
+}
+
+func (s *Server) endJournalReplay() {
+	s.deliveryMu.Lock()
+	s.journalReplay = false
+	s.deliveryMu.Unlock()
+	s.flushJournalAcknowledgements()
+}
+
+func (s *Server) flushJournalAcknowledgements() {
+	if s.journal == nil {
+		return
+	}
+	s.journalAckMu.Lock()
+	defer s.journalAckMu.Unlock()
+	for {
+		s.deliveryMu.Lock()
+		if s.journalReplay || len(s.journalReady) == 0 {
+			s.deliveryMu.Unlock()
+			return
+		}
+		var recordID string
+		for id := range s.journalReady {
+			recordID = id
+			break
+		}
+		s.deliveryMu.Unlock()
+
+		if err := s.acknowledgeJournalRecord(recordID); err != nil {
+			s.journalAckErrs.Add(1)
+			return
+		}
+		s.deliveryMu.Lock()
+		delete(s.journalReady, recordID)
+		s.deliveryMu.Unlock()
+	}
+}
+
+func (s *Server) acknowledgeJournalRecord(recordID string) error {
+	env, found, err := s.journal.LookupEnvelope(recordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if env.DeliveryID != "" && s.receipts != nil {
+		digest := env.RequestDigest
+		if digest == "" {
+			digest = digestHex(env.Payload)
+		}
+		receipt := journal.Envelope{
+			Signal: env.Signal, Tenant: env.Tenant, DeliveryID: env.DeliveryID,
+			RecordID: env.RecordID, RequestDigest: digest,
+			CreatedUnixNano: time.Now().UnixNano(),
+		}
+		existing, exists, lookupErr := s.receipts.LookupEnvelope(recordID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if exists {
+			if existing.DeliveryID != receipt.DeliveryID || existing.RequestDigest != receipt.RequestDigest || existing.Signal != receipt.Signal || existing.Tenant != receipt.Tenant {
+				return errors.New("delivery receipt identity conflict")
+			}
+		} else if _, appendErr := s.receipts.AppendEnvelope(receipt); appendErr != nil {
+			if errors.Is(appendErr, journal.ErrFull) {
+				if compactErr := s.receipts.CompactOlderThan(s.dedup.ttl); compactErr != nil {
+					return errors.Join(appendErr, compactErr)
+				}
+				_, appendErr = s.receipts.AppendEnvelope(receipt)
+			}
+			if appendErr != nil {
+				return appendErr
+			}
+		}
+		if err := s.dedup.rememberDigest(receipt.Tenant, receipt.Signal, receipt.DeliveryID, receipt.RequestDigest); err != nil {
+			return err
+		}
+	}
+	_, err = s.journal.Acknowledge(recordID)
+	return err
 }
 
 // ReplayAdmission replays durable admission records. The caller supplies the
@@ -551,13 +844,98 @@ func (s *Server) ReplayRouted(fn func(journal.Envelope) error) error {
 	if s.journal == nil {
 		return nil
 	}
+	// Recover the interrupted tail before migrating legacy envelopes. Migration
+	// requires a complete record stream and must never turn a recoverable crash
+	// tail into a startup failure.
+	if err := s.journal.Recover(func([]byte) error { return nil }); err != nil {
+		return err
+	}
+	if err := s.journal.EnsureRecordIDs(); err != nil {
+		return err
+	}
+	quarantined := make(map[string]struct{})
+	if s.quarantine != nil {
+		if err := s.quarantine.Recover(func(raw []byte) error {
+			env, err := journal.DecodeEnvelope(raw)
+			if err == nil && env.RecordID != "" {
+				quarantined[env.RecordID] = struct{}{}
+				slog.Error("journal quarantine recovered",
+					"record_id", env.RecordID,
+					"signal", env.Signal,
+					"reason", env.FailureReason,
+				)
+			}
+			return err
+		}); err != nil {
+			return fmt.Errorf("quarantine recovery: %w", err)
+		}
+	}
+	receipted := make(map[string]journal.Envelope)
+	if s.receipts != nil {
+		if err := s.receipts.Recover(func([]byte) error { return nil }); err != nil {
+			return fmt.Errorf("receipt recovery: %w", err)
+		}
+		if err := s.receipts.CompactOlderThan(s.dedup.ttl); err != nil {
+			return fmt.Errorf("receipt compaction: %w", err)
+		}
+		if err := s.receipts.Replay(func(raw []byte) error {
+			env, err := journal.DecodeEnvelope(raw)
+			if err != nil {
+				return err
+			}
+			receipted[env.RecordID] = env
+			return s.dedup.rememberDigest(env.Tenant, env.Signal, env.DeliveryID, env.RequestDigest)
+		}); err != nil {
+			return fmt.Errorf("receipt replay: %w", err)
+		}
+	}
+	if len(quarantined) > 0 || len(receipted) > 0 {
+		var remove []string
+		if err := s.journal.Replay(func(raw []byte) error {
+			env, err := journal.DecodeEnvelope(raw)
+			if err != nil {
+				return err
+			}
+			if _, exists := quarantined[env.RecordID]; exists {
+				remove = append(remove, env.RecordID)
+				return nil
+			}
+			if receipt, exists := receipted[env.RecordID]; exists {
+				digest := env.RequestDigest
+				if digest == "" {
+					digest = digestHex(env.Payload)
+				}
+				if receipt.Signal != env.Signal || receipt.Tenant != env.Tenant ||
+					receipt.DeliveryID != env.DeliveryID || receipt.RequestDigest != digest {
+					return errors.New("delivery receipt identity conflict during recovery")
+				}
+				remove = append(remove, env.RecordID)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, recordID := range remove {
+			if _, err := s.journal.Acknowledge(recordID); err != nil {
+				return fmt.Errorf("reconcile quarantined record: %w", err)
+			}
+		}
+	}
+	s.beginJournalReplay()
+	defer s.endJournalReplay()
 	return s.journal.Recover(func(payload []byte) error {
 		env, err := journal.DecodeEnvelope(payload)
 		if err != nil {
 			return err
 		}
 		if env.DeliveryID != "" {
-			s.dedup.remember(env.Tenant, env.Signal, env.DeliveryID, env.Payload)
+			if env.RequestDigest != "" {
+				if err := s.dedup.rememberDigest(env.Tenant, env.Signal, env.DeliveryID, env.RequestDigest); err != nil {
+					return err
+				}
+			} else {
+				s.dedup.remember(env.Tenant, env.Signal, env.DeliveryID, env.Payload)
+			}
 		}
 		return fn(env)
 	})
@@ -582,6 +960,94 @@ func (s *Server) JournalStats() (bytes, maxBytes int64) {
 		return 0, 0
 	}
 	return s.journal.Stats()
+}
+
+// DurabilitySnapshot is a bounded, secret-free view of the active journal,
+// retry state, receipts, and quarantine.
+type DurabilitySnapshot struct {
+	Enabled             bool
+	Healthy             bool
+	Reason              string
+	ActiveBytes         int64
+	ActiveMaxBytes      int64
+	ActiveRecords       uint64
+	ActiveOldestAge     time.Duration
+	ReceiptBytes        int64
+	ReceiptRecords      uint64
+	QuarantineBytes     int64
+	QuarantineRecords   uint64
+	PendingAttempts     int
+	RetryScheduled      int
+	AckReady            int
+	AckErrors           uint64
+	RedispatchAttempts  uint64
+	RedispatchSuccesses uint64
+	RedispatchFailures  uint64
+	QuarantinedTotal    uint64
+}
+
+func (s *Server) DurabilityStats() DurabilitySnapshot {
+	if s.journal == nil {
+		return DurabilitySnapshot{Healthy: true}
+	}
+	snapshot := DurabilitySnapshot{Enabled: true, Healthy: true}
+	snapshot.ActiveBytes, snapshot.ActiveMaxBytes = s.journal.Stats()
+	var oldest time.Time
+	var err error
+	snapshot.ActiveRecords, oldest, err = s.journal.RecordStats()
+	if err != nil {
+		snapshot.Healthy = false
+		snapshot.Reason = "journal_stats_failed"
+	}
+	if !oldest.IsZero() {
+		snapshot.ActiveOldestAge = time.Since(oldest)
+		if snapshot.ActiveOldestAge < 0 {
+			snapshot.ActiveOldestAge = 0
+		}
+	}
+	if s.receipts != nil {
+		snapshot.ReceiptBytes, _ = s.receipts.Stats()
+		snapshot.ReceiptRecords, _, err = s.receipts.RecordStats()
+		if err != nil && snapshot.Healthy {
+			snapshot.Healthy = false
+			snapshot.Reason = "receipt_stats_failed"
+		}
+	}
+	if s.quarantine != nil {
+		snapshot.QuarantineBytes, _ = s.quarantine.Stats()
+		snapshot.QuarantineRecords, _, err = s.quarantine.RecordStats()
+		if err != nil && snapshot.Healthy {
+			snapshot.Healthy = false
+			snapshot.Reason = "quarantine_stats_failed"
+		}
+	}
+	s.deliveryMu.Lock()
+	snapshot.PendingAttempts = len(s.journalPending)
+	snapshot.RetryScheduled = len(s.journalRetry)
+	snapshot.AckReady = len(s.journalReady)
+	s.deliveryMu.Unlock()
+	snapshot.AckErrors = s.journalAckErrs.Load()
+	snapshot.RedispatchAttempts = s.redispatchAttempts.Load()
+	snapshot.RedispatchSuccesses = s.redispatchSuccesses.Load()
+	snapshot.RedispatchFailures = s.redispatchFailures.Load()
+	snapshot.QuarantinedTotal = s.quarantinedTotal.Load()
+	if snapshot.Healthy && snapshot.ActiveMaxBytes > 0 && snapshot.ActiveBytes*10 >= snapshot.ActiveMaxBytes*9 {
+		snapshot.Healthy = false
+		snapshot.Reason = "journal_pressure"
+	}
+	if snapshot.Healthy && snapshot.QuarantineRecords > 0 {
+		snapshot.Healthy = false
+		snapshot.Reason = "quarantine_not_empty"
+	}
+	if snapshot.Healthy && snapshot.RetryScheduled > 0 {
+		snapshot.Healthy = false
+		snapshot.Reason = "required_delivery_retry"
+	}
+	if snapshot.Healthy && snapshot.AckReady > 0 {
+		snapshot.Healthy = false
+		snapshot.Reason = "journal_ack_pending"
+	}
+	return snapshot
 }
 
 // Start binds the listeners and begins serving, returning once both are bound
@@ -703,12 +1169,154 @@ func (s *Server) Start() error {
 		s.mu.Unlock()
 		go func() { _ = httpSrv.Serve(httpLn) }()
 	}
+	s.startRetryWorker()
 	return nil
 }
 
-// Stop gracefully drains in-flight requests, then closes both transports. After
-// Stop returns no handler is mid-flight, so the fed pipelines can be shut down.
-func (s *Server) Stop(ctx context.Context) error {
+func (s *Server) startRetryWorker() {
+	if s.journal == nil || s.retryCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.retryCancel = cancel
+	s.retryWG.Add(1)
+	go func() {
+		defer s.retryWG.Done()
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			case <-s.retryWake:
+			}
+			s.processDueRetries(ctx)
+		}
+	}()
+	s.wakeRetryWorker()
+}
+
+func (s *Server) processDueRetries(ctx context.Context) {
+	s.flushJournalAcknowledgements()
+	now := time.Now()
+	type dueRecord struct {
+		id    string
+		entry retryDelivery
+	}
+	var due []dueRecord
+	s.deliveryMu.Lock()
+	for id, entry := range s.journalRetry {
+		if entry.inFlight || entry.due.After(now) {
+			continue
+		}
+		entry.inFlight = true
+		s.journalRetry[id] = entry
+		due = append(due, dueRecord{id: id, entry: entry})
+	}
+	s.deliveryMu.Unlock()
+
+	for _, item := range due {
+		if item.entry.permanent {
+			if err := s.quarantineRecord(item.id, item.entry.reason); err != nil {
+				s.redispatchFailures.Add(1)
+				s.rescheduleRecord(item.id, true, item.entry.reason)
+			}
+			continue
+		}
+		s.redispatchAttempts.Add(1)
+		env, found, err := s.journal.LookupEnvelope(item.id)
+		if err != nil || !found {
+			if err != nil {
+				s.redispatchFailures.Add(1)
+				s.rescheduleRecord(item.id, false, durableFailureReason(err))
+			} else {
+				s.clearDeliveryState(item.id)
+			}
+			continue
+		}
+		dispatchCtx, cancel := context.WithTimeout(ctx, time.Second)
+		err = ReplayEnvelope(dispatchCtx, env, ReplaySinks{
+			Track:   s.TrackJournalRecord,
+			Traces:  s.sink.Traces,
+			Metrics: s.sink.Metrics,
+			Logs:    s.sink.Logs,
+		})
+		cancel()
+		if err != nil {
+			s.redispatchFailures.Add(1)
+			s.rescheduleRecord(item.id, false, durableFailureReason(err))
+			continue
+		}
+		s.redispatchSuccesses.Add(1)
+	}
+}
+
+func (s *Server) rescheduleRecord(recordID string, permanent bool, reason string) {
+	s.deliveryMu.Lock()
+	entry, exists := s.journalRetry[recordID]
+	if exists {
+		entry.inFlight = false
+		entry.permanent = permanent
+		entry.reason = reason
+		entry.attempts++
+		entry.due = time.Now().Add(s.retryDelay(entry.attempts))
+		s.journalRetry[recordID] = entry
+	}
+	s.deliveryMu.Unlock()
+}
+
+func (s *Server) clearDeliveryState(recordID string) {
+	s.deliveryMu.Lock()
+	delete(s.journalPending, recordID)
+	delete(s.journalRetry, recordID)
+	delete(s.journalReady, recordID)
+	s.deliveryMu.Unlock()
+}
+
+func (s *Server) quarantineRecord(recordID, reason string) error {
+	if s.quarantine == nil {
+		return errors.New("quarantine journal unavailable")
+	}
+	env, found, err := s.journal.LookupEnvelope(recordID)
+	if err != nil || !found {
+		if !found && err == nil {
+			s.clearDeliveryState(recordID)
+		}
+		return err
+	}
+	existing, exists, err := s.quarantine.LookupEnvelope(recordID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if existing.Signal != env.Signal || existing.Tenant != env.Tenant || existing.DeliveryID != env.DeliveryID {
+			return errors.New("quarantine record identity conflict")
+		}
+	} else {
+		env.FailureReason = reason
+		env.QuarantinedUnixNano = time.Now().UnixNano()
+		if _, err := s.quarantine.AppendEnvelope(env); err != nil {
+			return err
+		}
+	}
+	if _, err := s.journal.Acknowledge(recordID); err != nil {
+		return err
+	}
+	slog.Error("journal record moved to quarantine",
+		"record_id", recordID,
+		"signal", env.Signal,
+		"reason", reason,
+	)
+	s.quarantinedTotal.Add(1)
+	s.clearDeliveryState(recordID)
+	return nil
+}
+
+// StopServing gracefully drains in-flight requests and closes both transports
+// without closing the journal. The app uses this split lifecycle so exporter
+// drain can still acknowledge records before durable state is closed.
+func (s *Server) StopServing(ctx context.Context) error {
 	<-s.ready
 	s.mu.Lock()
 	grpcSrv, httpSrv, httpCancel := s.grpcSrv, s.httpSrv, s.httpCancel
@@ -751,10 +1359,35 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.grpcEdge != nil {
 		errs = append(errs, s.grpcEdge.Close())
 	}
-	if s.journal != nil {
-		errs = append(errs, s.journal.Close())
+	if s.retryCancel != nil {
+		s.retryCancel()
+		s.retryWG.Wait()
 	}
 	return errors.Join(errs...)
+}
+
+// CloseJournal closes durable state after every fed pipeline has drained.
+func (s *Server) CloseJournal() error {
+	s.journalClose.Do(func() {
+		var errs []error
+		if s.receipts != nil {
+			errs = append(errs, s.receipts.Close())
+		}
+		if s.quarantine != nil {
+			errs = append(errs, s.quarantine.Close())
+		}
+		if s.journal != nil {
+			errs = append(errs, s.journal.Close())
+		}
+		s.journalCloseErr = errors.Join(errs...)
+	})
+	return s.journalCloseErr
+}
+
+// Stop retains the standalone server contract: stop serving, then close its
+// journal. App uses StopServing and CloseJournal separately.
+func (s *Server) Stop(ctx context.Context) error {
+	return errors.Join(s.StopServing(ctx), s.CloseJournal())
 }
 
 // ReloadCredentials immediately checks all file-backed credentials on both
@@ -827,7 +1460,7 @@ func (s *Server) MetricLimitRejected() uint64 { return s.metricLimitRejected.Loa
 
 // admitTraces applies the trace admit hook (if any), enqueues the admitted
 // spans, and reports how many were rejected as invalid (partial_success).
-func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected int, reason string, err error) {
+func (s *Server) admitTraces(ctx context.Context, spans []model.Span, requestPayload ...[]byte) (rejected int, reason string, err error) {
 	var ok bool
 	ctx, ok = tenantContextWithPolicy(ctx, s.tenantMap)
 	if !ok {
@@ -849,7 +1482,26 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 		b, rejected, reason = s.sink.TraceAdmit(b)
 	}
 	if b.Len() > 0 {
+		payload := mustMarshal(amberexp.TraceRequest(b))
+		var request []byte
+		if len(requestPayload) > 0 {
+			request = requestPayload[0]
+		}
+		env, attempt, appendErr := s.appendAdmission(ctx, "traces", payload, request, b.Len())
+		if appendErr != nil {
+			return 0, "", appendErr
+		}
+		tenant, _ := TenantFromContext(ctx)
+		if env.Tenant != "" {
+			tenant = env.Tenant
+		}
+		for i := range b.Spans {
+			b.Spans[i].JournalRecordID = env.RecordID
+			b.Spans[i].DeliveryAttempt = attempt
+			b.Spans[i].Tenant = tenant
+		}
 		if err = s.sink.Traces(ctx, b); err != nil {
+			s.DeliveryFailed(b.DeliveryMetadata(), err)
 			return 0, "", err
 		}
 		s.tracesAccepted.Add(uint64(b.Len()))
@@ -863,7 +1515,7 @@ func (s *Server) admitTraces(ctx context.Context, spans []model.Span) (rejected 
 	return rejected, reason, nil
 }
 
-func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetrics) (rejected int, reason string, err error) {
+func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetrics, requestPayload ...[]byte) (rejected int, reason string, err error) {
 	var ok bool
 	ctx, ok = tenantContextWithPolicy(ctx, s.tenantMap)
 	if !ok {
@@ -913,7 +1565,24 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 		b, rejected, reason = s.sink.MetricAdmit(b)
 	}
 	if b.Len() > 0 {
+		payload := mustMarshal(&colmetricspb.ExportMetricsServiceRequest{ResourceMetrics: b.ResourceMetrics})
+		var request []byte
+		if len(requestPayload) > 0 {
+			request = requestPayload[0]
+		}
+		env, attempt, appendErr := s.appendAdmission(ctx, "metrics", payload, request, b.Len())
+		if appendErr != nil {
+			return 0, "", appendErr
+		}
+		b.RecordID = env.RecordID
+		b.DeliveryAttempt = attempt
+		b.Tenant, _ = TenantFromContext(ctx)
+		if env.Tenant != "" {
+			b.Tenant = env.Tenant
+		}
+		b.JournalUnits = b.Len()
 		if err = s.sink.Metrics(ctx, b); err != nil {
+			s.DeliveryFailed(b.DeliveryMetadata(), err)
 			return 0, "", err
 		}
 		s.pointsAccepted.Add(uint64(b.Len()))
@@ -927,7 +1596,7 @@ func (s *Server) admitMetrics(ctx context.Context, rm []*metricspb.ResourceMetri
 	return rejected, reason, nil
 }
 
-func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (rejected int, reason string, err error) {
+func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs, requestPayload ...[]byte) (rejected int, reason string, err error) {
 	var ok bool
 	ctx, ok = tenantContextWithPolicy(ctx, s.tenantMap)
 	if !ok {
@@ -1014,7 +1683,24 @@ func (s *Server) admitLogs(ctx context.Context, rl []*logspb.ResourceLogs) (reje
 		b, rejected, reason = s.sink.LogAdmit(b)
 	}
 	if b.Len() > 0 {
+		payload := mustMarshal(&collogspb.ExportLogsServiceRequest{ResourceLogs: b.ResourceLogs})
+		var request []byte
+		if len(requestPayload) > 0 {
+			request = requestPayload[0]
+		}
+		env, attempt, appendErr := s.appendAdmission(ctx, "logs", payload, request, b.Len())
+		if appendErr != nil {
+			return 0, "", appendErr
+		}
+		b.RecordID = env.RecordID
+		b.DeliveryAttempt = attempt
+		b.Tenant, _ = TenantFromContext(ctx)
+		if env.Tenant != "" {
+			b.Tenant = env.Tenant
+		}
+		b.JournalUnits = b.Len()
 		if err = s.sink.Logs(ctx, b); err != nil {
+			s.DeliveryFailed(b.DeliveryMetadata(), err)
 			return 0, "", err
 		}
 		s.logsAccepted.Add(uint64(b.Len()))
@@ -1045,7 +1731,7 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
 	spans := spansFromResourceSpans(req.GetResourceSpans())
-	rejected, reason, err := g.s.admitTraces(ctx, spans)
+	rejected, reason, err := g.s.admitTraces(ctx, spans, mustMarshal(req))
 	if err != nil {
 		g.s.errs.Add(1)
 		if admissionPermanent(err) {
@@ -1055,9 +1741,6 @@ func (g *grpcTraceService) Export(ctx context.Context, req *coltracepb.ExportTra
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
 		}
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
-	}
-	if err := g.s.appendAdmission(ctx, "traces", mustMarshal(req)); err != nil {
-		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	g.s.rememberGRPC(ctx, "traces", req)
 	resp := &coltracepb.ExportTraceServiceResponse{}
@@ -1083,7 +1766,7 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics())
+	rejected, reason, err := g.s.admitMetrics(ctx, req.GetResourceMetrics(), mustMarshal(req))
 	if err != nil {
 		g.s.errs.Add(1)
 		if admissionPermanent(err) {
@@ -1093,9 +1776,6 @@ func (g *grpcMetricsService) Export(ctx context.Context, req *colmetricspb.Expor
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
 		}
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
-	}
-	if err := g.s.appendAdmission(ctx, "metrics", mustMarshal(req)); err != nil {
-		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	g.s.rememberGRPC(ctx, "metrics", req)
 	resp := &colmetricspb.ExportMetricsServiceResponse{}
@@ -1121,7 +1801,7 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 	} else if result == dedupConflict {
 		return nil, status.Error(codes.InvalidArgument, "wisp envelope id payload conflict")
 	}
-	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs())
+	rejected, reason, err := g.s.admitLogs(ctx, req.GetResourceLogs(), mustMarshal(req))
 	if err != nil {
 		g.s.errs.Add(1)
 		if admissionPermanent(err) {
@@ -1131,9 +1811,6 @@ func (g *grpcLogsService) Export(ctx context.Context, req *collogspb.ExportLogsS
 			return nil, status.Error(codes.ResourceExhausted, err.Error())
 		}
 		return nil, status.Error(codes.Unavailable, "pipeline unavailable")
-	}
-	if err := g.s.appendAdmission(ctx, "logs", mustMarshal(req)); err != nil {
-		return nil, status.Error(codes.Unavailable, "admission journal unavailable")
 	}
 	g.s.rememberGRPC(ctx, "logs", req)
 	resp := &collogspb.ExportLogsServiceResponse{}
@@ -1158,7 +1835,14 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		s.errs.Add(1)
 		return
 	}
-	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "traces", body)
+	var pb coltracepb.ExportTraceServiceRequest
+	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
+		s.errs.Add(1)
+		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	canonical := mustMarshal(&pb)
+	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "traces", canonical)
 	if dedupErr != nil {
 		http.Error(w, dedupErr.Error(), http.StatusBadRequest)
 		return
@@ -1171,14 +1855,9 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &coltracepb.ExportTraceServiceResponse{})
 		return
 	}
-	var pb coltracepb.ExportTraceServiceRequest
-	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
-		s.errs.Add(1)
-		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
-		return
-	}
 	spans := spansFromResourceSpans(pb.GetResourceSpans())
-	rejected, reason, err := s.admitTraces(req.Context(), spans)
+	admitCtx := withDeliveryID(req.Context(), dedupKey)
+	rejected, reason, err := s.admitTraces(admitCtx, spans, canonical)
 	if err != nil {
 		s.errs.Add(1)
 		if admissionPermanent(err) {
@@ -1190,11 +1869,7 @@ func (s *Server) handleTraces(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := s.appendAdmission(withDeliveryID(req.Context(), dedupKey), "traces", body); err != nil {
-		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	s.rememberHTTP(req, "traces", dedupKey, body)
+	s.rememberHTTP(req, "traces", dedupKey, canonical)
 	resp := &coltracepb.ExportTraceServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &coltracepb.ExportTracePartialSuccess{
@@ -1215,7 +1890,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		s.errs.Add(1)
 		return
 	}
-	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "metrics", body)
+	var pb colmetricspb.ExportMetricsServiceRequest
+	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
+		s.errs.Add(1)
+		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	canonical := mustMarshal(&pb)
+	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "metrics", canonical)
 	if dedupErr != nil {
 		http.Error(w, dedupErr.Error(), http.StatusBadRequest)
 		return
@@ -1228,13 +1910,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &colmetricspb.ExportMetricsServiceResponse{})
 		return
 	}
-	var pb colmetricspb.ExportMetricsServiceRequest
-	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
-		s.errs.Add(1)
-		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	rejected, reason, err := s.admitMetrics(req.Context(), pb.GetResourceMetrics())
+	admitCtx := withDeliveryID(req.Context(), dedupKey)
+	rejected, reason, err := s.admitMetrics(admitCtx, pb.GetResourceMetrics(), canonical)
 	if err != nil {
 		s.errs.Add(1)
 		if admissionPermanent(err) {
@@ -1246,11 +1923,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := s.appendAdmission(withDeliveryID(req.Context(), dedupKey), "metrics", body); err != nil {
-		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	s.rememberHTTP(req, "metrics", dedupKey, body)
+	s.rememberHTTP(req, "metrics", dedupKey, canonical)
 	resp := &colmetricspb.ExportMetricsServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &colmetricspb.ExportMetricsPartialSuccess{
@@ -1271,7 +1944,14 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		s.errs.Add(1)
 		return
 	}
-	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "logs", body)
+	var pb collogspb.ExportLogsServiceRequest
+	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
+		s.errs.Add(1)
+		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	canonical := mustMarshal(&pb)
+	dedup, dedupKey, dedupErr := s.dedupHTTP(req, "logs", canonical)
 	if dedupErr != nil {
 		http.Error(w, dedupErr.Error(), http.StatusBadRequest)
 		return
@@ -1284,13 +1964,8 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		writeResponse(w, enc, &collogspb.ExportLogsServiceResponse{})
 		return
 	}
-	var pb collogspb.ExportLogsServiceRequest
-	if err := otlphttp.Unmarshal(enc, body, &pb); err != nil {
-		s.errs.Add(1)
-		http.Error(w, "bad payload: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	rejected, reason, err := s.admitLogs(req.Context(), pb.GetResourceLogs())
+	admitCtx := withDeliveryID(req.Context(), dedupKey)
+	rejected, reason, err := s.admitLogs(admitCtx, pb.GetResourceLogs(), canonical)
 	if err != nil {
 		s.errs.Add(1)
 		if admissionPermanent(err) {
@@ -1302,11 +1977,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := s.appendAdmission(withDeliveryID(req.Context(), dedupKey), "logs", body); err != nil {
-		http.Error(w, "admission journal unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	s.rememberHTTP(req, "logs", dedupKey, body)
+	s.rememberHTTP(req, "logs", dedupKey, canonical)
 	resp := &collogspb.ExportLogsServiceResponse{}
 	if rejected > 0 {
 		resp.PartialSuccess = &collogspb.ExportLogsPartialSuccess{

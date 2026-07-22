@@ -1,85 +1,84 @@
 # Coral platform compatibility
 
-Updated: 2026-07-18
+Updated: 2026-07-22
 
-This matrix separates implemented compatibility from planned integration. A
-platform repository being locally available does not make an untagged contract
-part of Coral.
+Coral baseline: `f0868e1` (unreleased)
 
-| Component | Contract/version | Coral relationship | Current status |
-|---|---|---|---|
-| Gyre | v0.5.0 | Operational lifecycle, readiness, status, typed errors, and resource identity | `App` implements `gyre.Component`; standard health/readiness/status endpoints are mounted. Runtime, reload, admin, and resource layering are not adopted yet. |
-| Reef | v0.3.0 | TLS, mTLS, bearer principals, credential rotation, and complete edge policy | Production edge APIs protect OTLP, self-observability, and HTTP exporters. Reef supplies a named principal; Coral does not yet map it to an organisation/project. |
-| Wisp | v0.7.0 stable; v0.8.x delivery contract under development | Durable edge sender of standard OTLP | Standard OTLP works without Wisp headers. `x-wisp-envelope-id` and `x-wisp-signal-kind` are not consumed yet; deduplication is therefore not claimed. |
-| Amber | Contract requires separate verification | Durable telemetry destination | Coral exports to Amber, but acknowledgement after Coral ingress is not proof of Amber durable admission. |
-| Fathom | Contract requires separate verification | Derived/analysis destination | Coral exports independently from the Amber lane; it does not assign Fathom storage or query responsibilities to itself. |
+This matrix records the versions Coral builds against and the behavior
+verified in the current workspace. It is not a promise about unreviewed future
+commits in sibling repositories.
 
-## Gyre boundary
+| Component | Version/baseline | Current Coral contract |
+| --- | --- | --- |
+| Gyre | module `v0.5.0` | `App` implements `gyre.Component`; `/healthz`, `/readyz`, and `/status` use the Gyre lifecycle contract. Coral does not implement Runtime, Admin, or Reloadable. |
+| Reef | module `v0.3.0` | OTLP gRPC/HTTP, self-observation, and HTTP exporters use high-level fail-closed edges with managed credentials. Legacy Jaeger/Zipkin listeners are not Reef-protected. |
+| Wisp | released `v0.11.0` | Standard OTLP works. Optional `x-wisp-envelope-id` and `x-wisp-signal-kind` use canonical mapped-tenant dedup plus bounded durable response-loss receipts. Coral's delivery ownership is independent of Wisp's version cadence. |
+| Amber | local `v0.3.0-39-g06107b8`; no Coral pin | HTTP OTLP endpoints are the required source-of-truth destination. Coral preserves metric/log protobuf structures and maximal trace metadata, rejects non-zero OTLP partial success as permanent incomplete delivery, and quarantines the required journal record. Real-pair fidelity remains a stabilization gate. |
+| Fathom | local untagged `0233fb5`; no Coral pin | Optional isolated derived fan-out over OTLP/HTTP. The three-signal replay/readiness gate passes at the current workspace baselines. Fathom failure must not block Amber, but lane drops remain observable data loss for that derived destination. |
 
-Gyre is the shared operational contract, not the tenant control plane and not a
-telemetry transport. Coral vNext adopts these v0.5.0 semantics:
+## Stable wire contracts
 
-- stable component identity `coral` and release version;
-- lifecycle states and a bounded, secret-free status snapshot;
-- `Close` is safe before `Start`, repeatable, and returns on caller
-  cancellation/deadline while cleanup continues;
-- partial startup is rolled back in reverse order;
-- readiness failures use Gyre typed errors;
-- `/healthz`, `/readyz`, and `/status` use `gyre.HTTPHandler`.
+- Coral owns the platform-standard OTLP ports 4317 (gRPC) and 4318 (HTTP) for
+  traces, metrics, and logs.
+- Clients without Wisp headers remain valid standard OTLP clients.
+- Wisp headers are delivery metadata, not authentication or tenant selection.
+- Reef authentication derives the principal. Payload attributes never select
+  a tenant.
+- External plaintext on Reef-managed edges is rejected unless `insecure: true`
+  is explicit. Bearer over plaintext additionally requires
+  `danger_allow_bearer_over_plaintext: true`.
+- `service.name` is guaranteed by configured Coral processing before supported
+  downstream paths.
+- Amber is the required durable source of truth in the production profile;
+  Fathom is a derived fan-out.
 
-Coral deliberately does not mount Gyre Admin endpoints. They would expose
-configuration operations and must first be protected through a reviewed Reef
-edge and audit model. Coral also does not implement `gyre.Reloadable` yet:
-accepted generations need transactional pipeline replacement, last-known-good
-preservation, and tests before that contract can be claimed.
+## Current compatibility boundaries
 
-Gyre `Resource` merging is reserved for a versioned Coral resource/config
-increment. It must reject conflicting `service.name` values and must not
-silently rewrite incoming OTLP resource identity.
+### Wisp delivery identity
 
-## Reef boundary
+Coral accepts a 32-hex-character `x-wisp-envelope-id` and an optional signal
+kind matching the actual OTLP endpoint. Same identity and payload can be
+acknowledged as a duplicate; a different payload is a permanent conflict.
+Dedup is bounded by 15 minutes and 100,000 in-memory entries. Completed Wisp
+identities additionally use a bounded `<journal_path>.receipts` ledger for the
+same TTL. Live lookup, active journal, receipt replay, and restart recovery use
+the mapped tenant, signal, normalized delivery ID, and canonical request digest.
 
-Reef owns transport security. Gyre status may report bounded security
-conditions, but cannot validate certificates, tokens, or rotation itself.
+### Tenant identity
 
-Coral adopts Reef v0.3.0 unified edge policy and observable last-known-good
-credential rotation. External plaintext and bearer exposure require explicit
-opt-ins; HTTP exporter credentials are origin-bound. The migration is in
-`docs/REEF_V0.3_MIGRATION.md`.
+`tenant_map` is currently an ingress allowlist and quota key. It is not a
+versioned organisation/project control plane. The mapped value is carried
+through asynchronous pipeline ownership, sampling, journal, and dedup, but is
+not yet propagated to downstream storage routing. The next stable release will
+either complete that propagation or expose only a fail-closed single-tenant
+production profile.
 
-Reef exposes the matched credential name as a principal, but that name is not
-automatically an organisation/project. Consequently Coral is authenticated but
-not yet multi-tenant. Tenant identity must be server-derived from a reviewed
-Reef/Coral mapping; payload attributes and Wisp envelope IDs cannot select a
-tenant.
+### Durability
 
-## Wisp boundary
+Wisp has a durable edge spool and Amber has its own WAL. With `journal_path`,
+Coral fsyncs admitted OTLP before success, keeps per-record ownership through
+processing, and removes active work only after every required Amber
+contribution completes or an atomic move to permanent-failure quarantine.
+Transient failure is redispatched live with bounded state. Receipt/quarantine
+sidecars are recovered before active replay, including interrupted transitions.
+Readiness fails on journal pressure, retry/ack backlog, or non-empty quarantine.
 
-Wisp remains the collection agent. Coral remains compatible with any standard
-OTLP client and never requires Wisp-specific headers.
+### Legacy receivers
 
-When implemented, Wisp delivery identity will have these boundaries:
+Jaeger Thrift and Zipkin remain trace-only compatibility receivers. Their
+listeners do not use Reef edge policy. They are outside the production profile
+until they are protected or restricted to explicit loopback/insecure use.
 
-- exactly 32 hexadecimal characters when present;
-- optional and never authentication;
-- scoped by server-derived organisation, project, actual signal, and envelope
-  ID;
-- same identity plus the same payload digest is an idempotent hit;
-- same identity plus another digest is a permanent, observable conflict;
-- dedup state is bounded by both TTL and capacity;
-- duplicates remain possible after TTL/capacity eviction, state loss, or a
-  response-loss boundary.
+## Required release matrix
 
-This cannot be implemented safely before tenant identity because a global
-dedup key would let one caller interfere with another.
+Before Coral's next stable release, the exact release commit must pass:
 
-## Compatibility gates
+- Wisp v0.11 → Coral → Amber for traces, metrics, and logs, including outage,
+  retry, response loss, restart, and duplicate delivery;
+- Coral → Fathom three-signal fan-out and failure isolation;
+- Gyre lifecycle conformance and Reef credential rotation;
+- maximal OTLP fidelity/privacy fixtures against Amber;
+- current and previous supported journal format recovery and rollback tests.
 
-Every cross-repository increment must:
-
-1. depend only on a tagged version;
-2. record the exact contract and compatibility/migration story;
-3. preserve standard OTLP behavior;
-4. test gRPC and HTTP parity where applicable;
-5. avoid changing Gyre, Reef, or Wisp public contracts implicitly;
-6. verify CI on the feature commit and the final `main` commit.
+Any sibling version used by those gates must be recorded in the release
+notes and artifact provenance.

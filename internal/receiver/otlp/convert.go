@@ -53,14 +53,16 @@ func spanFromProto(s *tracepb.Span, res model.Resource, context ...any) model.Sp
 		Status:       statusFromProto(s.GetStatus()),
 		StatusMsg:    s.GetStatus().GetMessage(),
 		Attrs:        attrsFromKV(s.GetAttributes()),
-		OTLP:         raw, ScopeName: scope.GetName(), ScopeVersion: scope.GetVersion(), SchemaURL: schema,
+		OTLP:         raw, ScopeName: scope.GetName(), ScopeVersion: scope.GetVersion(),
+		ScopeAttributes: attrsFromKV(scope.GetAttributes()), ScopeDroppedAttrs: scope.GetDroppedAttributesCount(),
+		SchemaURL: schema, ResourceSchemaURL: resourceSchema, ScopeSchemaURL: scopeSchema,
 		TraceFlags: uint32(s.GetFlags()), DroppedAttributes: s.GetDroppedAttributesCount(),
 		DroppedEvents: s.GetDroppedEventsCount(), DroppedLinks: s.GetDroppedLinksCount(),
 	}
 }
 
 func resourceFromProto(r *resourcepb.Resource) model.Resource {
-	return model.Resource{Attrs: attrsFromKV(r.GetAttributes())}
+	return model.Resource{Attrs: attrsFromKV(r.GetAttributes()), DroppedAttributes: r.GetDroppedAttributesCount()}
 }
 
 func kindFromProto(k tracepb.Span_SpanKind) model.SpanKind {

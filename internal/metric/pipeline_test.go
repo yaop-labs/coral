@@ -137,3 +137,27 @@ func TestFathomMetricExporterExport(t *testing.T) {
 		t.Fatalf("unexpected metric request: %+v", got)
 	}
 }
+
+func TestMetricExporterPartialSuccessIsNotDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, _ := proto.Marshal(&colmetricspb.ExportMetricsServiceResponse{
+			PartialSuccess: &colmetricspb.ExportMetricsPartialSuccess{RejectedDataPoints: 1, ErrorMessage: "invalid point"},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	exporter, err := NewAmberExporter(server.URL, time.Second, RetryPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := Batch{ResourceMetrics: []*metricspb.ResourceMetrics{{
+		ScopeMetrics: []*metricspb.ScopeMetrics{{Metrics: []*metricspb.Metric{{
+			Name: "gauge",
+			Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{}}}},
+		}}}},
+	}}}
+	if err := exporter.Export(context.Background(), batch); err == nil {
+		t.Fatal("partial success was treated as complete delivery")
+	}
+}

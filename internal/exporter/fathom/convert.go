@@ -22,12 +22,27 @@ func toTraceRequest(b model.Batch) *coltracepb.ExportTraceServiceRequest {
 	var order []string
 	for i := range b.Spans {
 		s := &b.Spans[i]
-		key := resourceKey(s.Resource) + "\x00" + s.ScopeName + "\x00" + s.ScopeVersion + "\x00" + s.SchemaURL
+		scopeSchema := firstNonEmpty(s.ScopeSchemaURL, s.SchemaURL)
+		key := resourceKey(s.Resource) + "\x00" + s.ResourceSchemaURL + "\x00" +
+			s.ScopeName + "\x00" + s.ScopeVersion + "\x00" + scopeSchema + "\x00" +
+			attributesKey(s.ScopeAttributes)
 		rs := groups[key]
 		if rs == nil {
 			rs = &tracepb.ResourceSpans{
-				Resource:   &resourcepb.Resource{Attributes: kvFromAttrs(s.Resource.Attrs)},
-				ScopeSpans: []*tracepb.ScopeSpans{{Scope: &commonpb.InstrumentationScope{Name: firstNonEmpty(s.ScopeName, scopeName), Version: s.ScopeVersion}, SchemaUrl: s.SchemaURL}},
+				Resource: &resourcepb.Resource{
+					Attributes:             kvFromAttrs(s.Resource.Attrs),
+					DroppedAttributesCount: s.Resource.DroppedAttributes,
+				},
+				SchemaUrl: s.ResourceSchemaURL,
+				ScopeSpans: []*tracepb.ScopeSpans{{
+					Scope: &commonpb.InstrumentationScope{
+						Name:                   firstNonEmpty(s.ScopeName, scopeName),
+						Version:                s.ScopeVersion,
+						Attributes:             kvFromAttrs(s.ScopeAttributes),
+						DroppedAttributesCount: s.ScopeDroppedAttrs,
+					},
+					SchemaUrl: scopeSchema,
+				}},
 			}
 			groups[key] = rs
 			order = append(order, key)
@@ -84,6 +99,8 @@ func spanToProto(s *model.Span) *tracepb.Span {
 	*/
 	if !s.ParentSpanID.IsZero() {
 		sp.ParentSpanId = append([]byte(nil), s.ParentSpanID[:]...)
+	} else {
+		sp.ParentSpanId = nil
 	}
 	return sp
 }
@@ -166,7 +183,11 @@ func anyFromGo(value any) *commonpb.AnyValue {
 }
 
 func resourceKey(resource model.Resource) string {
-	attrs := append([]model.Attribute(nil), resource.Attrs...)
+	return attributesKey(resource.Attrs) + fmt.Sprintf("\x00%d", resource.DroppedAttributes)
+}
+
+func attributesKey(input []model.Attribute) string {
+	attrs := append([]model.Attribute(nil), input...)
 	sort.Slice(attrs, func(i, j int) bool { return attrs[i].Key < attrs[j].Key })
 	var b strings.Builder
 	for _, attr := range attrs {

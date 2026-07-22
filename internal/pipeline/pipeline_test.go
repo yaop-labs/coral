@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaop-labs/coral/internal/delivery"
 	"github.com/yaop-labs/coral/internal/model"
 )
 
@@ -43,6 +44,11 @@ type capturingExporter struct {
 	mu    sync.Mutex
 	spans []model.Span
 }
+
+type gateFailingExporter struct{ err error }
+
+func (e gateFailingExporter) Export(context.Context, model.Batch) error { return e.err }
+func (e gateFailingExporter) Close() error                              { return nil }
 
 func (e *capturingExporter) Export(_ context.Context, b model.Batch) error {
 	e.mu.Lock()
@@ -209,6 +215,49 @@ func TestPipeline_DirectExport(t *testing.T) {
 	}
 	if exp.Len() != 1 {
 		t.Fatalf("expected 1 span, got %d", exp.Len())
+	}
+}
+
+func TestPipeline_DurableCompletionRequiresEveryRequiredExporter(t *testing.T) {
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p.AddRequiredExporter(&capturingExporter{})
+	p.AddRequiredExporter(gateFailingExporter{err: errors.New("required unavailable")})
+	p.AddExporter(&capturingExporter{})
+	confirmed := make(chan delivery.Metadata, 1)
+	p.SetDeliveryObserver(func(meta delivery.Metadata) { confirmed <- meta })
+
+	batch := model.Batch{Spans: []model.Span{{Name: "durable", JournalRecordID: "record-1"}}}
+	if err := p.Export(context.Background(), batch); err == nil {
+		t.Fatal("required exporter failure was hidden")
+	}
+	select {
+	case meta := <-confirmed:
+		t.Fatalf("premature durable completion: %+v", meta)
+	default:
+	}
+}
+
+func TestPipeline_OptionalFailureDoesNotBlockDurableCompletion(t *testing.T) {
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 16}, slog.Default())
+	p.AddRequiredExporter(&capturingExporter{})
+	p.AddExporter(gateFailingExporter{err: errors.New("optional unavailable")})
+	confirmed := make(chan delivery.Metadata, 1)
+	p.SetDeliveryObserver(func(meta delivery.Metadata) { confirmed <- meta })
+
+	batch := model.Batch{Spans: []model.Span{
+		{Name: "one", JournalRecordID: "record-1"},
+		{Name: "two", JournalRecordID: "record-1"},
+	}}
+	if err := p.Export(context.Background(), batch); err == nil {
+		t.Fatal("optional exporter failure should remain visible to the caller")
+	}
+	select {
+	case meta := <-confirmed:
+		if len(meta.Records) != 1 || meta.Records[0].RecordID != "record-1" || meta.Records[0].Units != 2 {
+			t.Fatalf("completion metadata = %+v", meta)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("required exporter success did not complete durable work")
 	}
 }
 
@@ -642,6 +691,34 @@ type failingExporter struct{ err error }
 func (e *failingExporter) Export(context.Context, model.Batch) error { return e.err }
 func (*failingExporter) Close() error                                { return nil }
 
+type metadataErasingProcessor struct{ err error }
+
+func (p metadataErasingProcessor) Process(context.Context, model.Batch) (model.Batch, error) {
+	return model.Batch{}, p.err
+}
+func (metadataErasingProcessor) Close() error { return nil }
+
+func TestPipeline_ProcessorFailureRetainsInputDeliveryMetadata(t *testing.T) {
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
+	p.AddProcessor(metadataErasingProcessor{err: errors.New("processor failed")})
+	failures := make(chan delivery.Metadata, 1)
+	p.SetDeliveryFailureObserver(func(meta delivery.Metadata, _ error) { failures <- meta })
+	err := p.Export(context.Background(), model.Batch{Spans: []model.Span{{
+		Name: "owned", JournalRecordID: "record-1", DeliveryAttempt: 7,
+	}}})
+	if err == nil {
+		t.Fatal("processor failure was hidden")
+	}
+	select {
+	case meta := <-failures:
+		if len(meta.Records) != 1 || meta.Records[0].RecordID != "record-1" || meta.Records[0].Attempt != 7 {
+			t.Fatalf("failure metadata = %+v", meta)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("processor failure lost its input delivery metadata")
+	}
+}
+
 func TestPipeline_ShutdownReportsDeliveryFailure(t *testing.T) {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
@@ -666,6 +743,32 @@ func TestPipeline_ShutdownReportsDeliveryFailure(t *testing.T) {
 	}
 	if got := p.DrainStats().Outcome; got != "failed" {
 		t.Fatalf("drain outcome = %q, want failed", got)
+	}
+}
+
+func TestPipeline_ShutdownDoesNotReportDurablyRetriedFailureAsLoss(t *testing.T) {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	p := New[model.Batch](Config{Workers: 1, QueueSize: 4}, slog.Default())
+	p.AddRequiredExporter(&failingExporter{err: errors.New("temporary Amber failure")})
+	p.SetDeliveryObserver(func(delivery.Metadata) {})
+	failures := make(chan delivery.Metadata, 1)
+	p.SetDeliveryFailureObserver(func(meta delivery.Metadata, _ error) { failures <- meta })
+	if err := p.Start(runCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Enqueue(context.Background(), model.Batch{Spans: []model.Span{{
+		Name: "retained", JournalRecordID: "record-1", DeliveryAttempt: 1,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-failures:
+	case <-time.After(time.Second):
+		t.Fatal("required failure was not returned to durable delivery")
+	}
+	cancelRun()
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("durably retained failure reported as terminal loss: %v", err)
 	}
 }
 

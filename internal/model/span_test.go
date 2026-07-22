@@ -119,13 +119,17 @@ func TestSpanStatusString(t *testing.T) {
 }
 
 func TestSpanSizeBytes(t *testing.T) {
+	raw := make([]byte, 4096)
 	s := Span{
-		Name:     "test",
-		Attrs:    []Attribute{StringAttr("k", "v")},
-		Resource: Resource{Attrs: []Attribute{StringAttr("service.name", "svc")}},
+		Name:      "test",
+		Attrs:     []Attribute{StringAttr("k", "v")},
+		Resource:  Resource{Attrs: []Attribute{StringAttr("service.name", "svc")}},
+		OTLP:      raw,
+		ScopeName: "instrumentation",
+		SchemaURL: "https://opentelemetry.io/schemas/1.26.0",
 	}
-	if s.SizeBytes() <= 0 {
-		t.Error("SizeBytes should be positive")
+	if got := s.SizeBytes(); got < len(raw) {
+		t.Fatalf("SizeBytes = %d, want at least raw OTLP size %d", got, len(raw))
 	}
 }
 

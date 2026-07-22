@@ -11,12 +11,28 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/yaop-labs/coral/internal/delivery"
 	"github.com/yaop-labs/coral/internal/pipeline"
 )
 
 // Batch is a set of OTLP ResourceMetrics flowing through the pipeline.
 type Batch struct {
 	ResourceMetrics []*metricspb.ResourceMetrics
+	RecordID        string
+	DeliveryAttempt uint64
+	Tenant          string
+	JournalUnits    int
+}
+
+func (b Batch) DeliveryMetadata() delivery.Metadata {
+	if b.RecordID == "" {
+		return delivery.Metadata{Tenant: b.Tenant}
+	}
+	units := b.JournalUnits
+	if units <= 0 {
+		units = b.Len()
+	}
+	return delivery.Metadata{Tenant: b.Tenant, Records: []delivery.RecordContribution{{RecordID: b.RecordID, Attempt: b.DeliveryAttempt, Units: units}}}
 }
 
 func (b Batch) Empty() bool { return b.Len() == 0 }
@@ -36,7 +52,7 @@ func (b Batch) Len() int {
 }
 
 func (b Batch) SizeBytes() int {
-	n := 0
+	n := len(b.RecordID) + len(b.Tenant) + 16
 	for _, rm := range b.ResourceMetrics {
 		n += proto.Size(rm)
 	}

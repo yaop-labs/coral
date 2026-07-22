@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/yaop-labs/coral/internal/delivery"
 )
 
 // Config controls pipeline concurrency.
@@ -34,9 +36,9 @@ func (c *Config) setDefaults() {
 // exporters. A single worker-pool implementation serves every signal type
 // (traces, metrics, logs); the element type T carries the signal-specific data.
 //
-// Delivery is at-most-once within coral: there is no spool, so batches are
-// dropped on backpressure or shutdown rather than persisted. End-to-end
-// durability rests on the wisp spool and amber WAL at the edges (contract §1).
+// Durable OTLP batches carry journal ownership metadata. Required-destination
+// failures are returned to the ingress retry/quarantine loop; batches without
+// that metadata retain the pipeline's fail-loud, best-effort semantics.
 type Pipeline[T Signal] struct {
 	cfg        Config
 	receivers  []Receiver[T]
@@ -47,8 +49,11 @@ type Pipeline[T Signal] struct {
 	in             chan T
 	wg             sync.WaitGroup
 	exporterWG     sync.WaitGroup
-	exporterLanes  []chan T
+	exporterLanes  []chan exporterItem[T]
+	exporterNeeded []bool
 	exporterBytes  []atomic.Int64
+	deliveryObs    func(delivery.Metadata)
+	deliveryFail   func(delivery.Metadata, error)
 	stateMu        sync.Mutex
 	shutdownOnce   sync.Once
 	shutdownDone   chan struct{}
@@ -84,6 +89,36 @@ type Pipeline[T Signal] struct {
 	itemsDelivered    atomic.Uint64
 	processorFailures atomic.Uint64
 	exporterFailures  atomic.Uint64
+	terminalFailures  atomic.Uint64
+}
+
+type exporterItem[T Signal] struct {
+	batch    T
+	required bool
+	attempt  *deliveryAttempt
+}
+
+type deliveryAttempt struct {
+	remaining atomic.Int64
+	meta      delivery.Metadata
+	observer  func(delivery.Metadata)
+	failure   func(delivery.Metadata, error)
+	failOnce  sync.Once
+}
+
+func (d *deliveryAttempt) fail(err error) bool {
+	if d == nil || d.failure == nil || err == nil {
+		return false
+	}
+	d.failOnce.Do(func() { d.failure(d.meta, err) })
+	return true
+}
+
+func (d *deliveryAttempt) confirm() {
+	if d == nil || d.remaining.Add(-1) != 0 || d.observer == nil {
+		return
+	}
+	d.observer(d.meta)
 }
 
 // New creates a pipeline for signal type T. T must be supplied explicitly, as
@@ -105,7 +140,32 @@ var errPipelineStarted = errors.New("pipeline already started")
 
 func (p *Pipeline[T]) AddReceiver(r Receiver[T])    { p.receivers = append(p.receivers, r) }
 func (p *Pipeline[T]) AddProcessor(pr Processor[T]) { p.processors = append(p.processors, pr) }
-func (p *Pipeline[T]) AddExporter(e Exporter[T])    { p.exporters = append(p.exporters, e) }
+
+// AddExporter adds an isolated best-effort destination. Its outcome never
+// acknowledges durable journal work.
+func (p *Pipeline[T]) AddExporter(e Exporter[T]) {
+	p.exporters = append(p.exporters, e)
+	p.exporterNeeded = append(p.exporterNeeded, false)
+}
+
+// AddRequiredExporter adds a destination whose successful durable admission
+// is required before a journal record may be acknowledged.
+func (p *Pipeline[T]) AddRequiredExporter(e Exporter[T]) {
+	p.exporters = append(p.exporters, e)
+	p.exporterNeeded = append(p.exporterNeeded, true)
+}
+
+// SetDeliveryObserver installs the journal completion callback. It must be
+// configured before Start.
+func (p *Pipeline[T]) SetDeliveryObserver(fn func(delivery.Metadata)) {
+	p.deliveryObs = fn
+}
+
+// SetDeliveryFailureObserver installs the durable retry/quarantine callback
+// for processor failures and required-destination failures.
+func (p *Pipeline[T]) SetDeliveryFailureObserver(fn func(delivery.Metadata, error)) {
+	p.deliveryFail = fn
+}
 
 // Enqueue pushes b onto the worker queue, blocking on backpressure until a
 // worker is free or ctx is canceled. Empty batches are dropped silently. It is
@@ -163,7 +223,7 @@ func (p *Pipeline[T]) Start(ctx context.Context) error {
 	p.workCtx, p.workCancel = context.WithCancel(context.WithoutCancel(ctx))
 
 	for range p.exporters {
-		p.exporterLanes = append(p.exporterLanes, make(chan T, p.cfg.QueueSize))
+		p.exporterLanes = append(p.exporterLanes, make(chan exporterItem[T], p.cfg.QueueSize))
 		p.exporterBytes = append(p.exporterBytes, atomic.Int64{})
 	}
 	for i, e := range p.exporters {
@@ -171,15 +231,25 @@ func (p *Pipeline[T]) Start(ctx context.Context) error {
 		p.exporterWG.Add(1)
 		go func() {
 			defer p.exporterWG.Done()
-			for b := range lane {
-				p.exporterBytes[i].Add(-signalBytes(b))
-				if err := e.Export(p.workCtx, b); err != nil {
+			for item := range lane {
+				p.exporterBytes[i].Add(-signalBytes(item.batch))
+				if err := e.Export(p.workCtx, item.batch); err != nil {
 					p.exporterFailures.Add(1)
 					p.logger.Error("exporter error", "err", err)
+					if item.required {
+						if !item.attempt.fail(err) {
+							p.terminalFailures.Add(1)
+						}
+					} else if p.deliveryFail == nil {
+						p.terminalFailures.Add(1)
+					}
 					continue
 				}
+				if item.required {
+					item.attempt.confirm()
+				}
 				p.batchesDelivered.Add(1)
-				p.itemsDelivered.Add(uint64(b.Len()))
+				p.itemsDelivered.Add(uint64(item.batch.Len()))
 			}
 		}()
 	}
@@ -347,6 +417,12 @@ func (p *Pipeline[T]) failureError() error {
 	processorFailures := p.processorFailures.Load()
 	exporterFailures := p.exporterFailures.Load()
 	exporterDrops := p.exporterDrops.Load()
+	if p.deliveryFail != nil {
+		if terminal := p.terminalFailures.Load(); terminal > 0 {
+			return fmt.Errorf("pipeline data loss: unrecoverable_failures=%d", terminal)
+		}
+		return nil
+	}
 	if processorFailures == 0 && exporterFailures == 0 && exporterDrops == 0 {
 		return nil
 	}
@@ -447,9 +523,15 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 		startIndex = len(p.processors)
 	}
 	for _, pr := range p.processors[startIndex:] {
+		input := b
 		b, err = pr.Process(ctx, b)
 		if err != nil {
 			p.processorFailures.Add(1)
+			// A failed processor is allowed to return an empty/partial batch.
+			// Delivery ownership belongs to its input until processing succeeds.
+			if !p.notifyDeliveryFailure(input, err) {
+				p.terminalFailures.Add(1)
+			}
 			return fmt.Errorf("processor: %w", err)
 		}
 		if b.Len() == 0 {
@@ -466,19 +548,34 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 		// Each exporter owns a bounded delivery lane. A retrying or unavailable
 		// destination can fill and drop its own lane, but cannot delay or block
 		// delivery to the other fan-out destinations.
+		attempt := p.newDeliveryAttempt(b)
 		for i, lane := range p.exporterLanes {
 			bytes := signalBytes(b)
 			if !p.reserveLaneBytes(i, bytes) {
 				p.exporterDrops.Add(1)
+				if p.exporterNeeded[i] {
+					if !attempt.fail(errors.New("required exporter lane byte limit exceeded")) {
+						p.terminalFailures.Add(1)
+					}
+				} else if p.deliveryFail == nil {
+					p.terminalFailures.Add(1)
+				}
 				continue
 			}
 			select {
-			case lane <- b:
+			case lane <- exporterItem[T]{batch: b, required: p.exporterNeeded[i], attempt: attempt}:
 				p.batchesDispatched.Add(1)
 				p.itemsDispatched.Add(uint64(b.Len()))
 			default:
 				p.exporterBytes[i].Add(-bytes)
 				p.exporterDrops.Add(1)
+				if p.exporterNeeded[i] {
+					if !attempt.fail(errors.New("required exporter lane is full")) {
+						p.terminalFailures.Add(1)
+					}
+				} else if p.deliveryFail == nil {
+					p.terminalFailures.Add(1)
+				}
 				p.logger.Error("exporter queue full; batch dropped", "exporter", i)
 			}
 		}
@@ -486,21 +583,81 @@ func (p *Pipeline[T]) processFrom(ctx context.Context, b T, startIndex int) erro
 		// Direct Export before Start remains synchronous for processors/tests that
 		// use the pipeline as a simple composition primitive.
 		var errs []error
+		requiredSucceeded := true
+		requiredCount := 0
 		for i, e := range p.exporters {
 			p.batchesDispatched.Add(1)
 			p.itemsDispatched.Add(uint64(b.Len()))
 			if err := e.Export(ctx, b); err != nil {
+				if p.exporterNeeded[i] {
+					requiredSucceeded = false
+					if !p.notifyDeliveryFailure(b, err) {
+						p.terminalFailures.Add(1)
+					}
+				} else if p.deliveryFail == nil {
+					p.terminalFailures.Add(1)
+				}
 				p.exporterFailures.Add(1)
 				p.logger.Error("exporter error", "exporter", i, "err", err)
 				errs = append(errs, fmt.Errorf("exporter %d: %w", i, err))
 				continue
 			}
+			if p.exporterNeeded[i] {
+				requiredCount++
+			}
 			p.batchesDelivered.Add(1)
 			p.itemsDelivered.Add(uint64(b.Len()))
+		}
+		if requiredCount > 0 && requiredSucceeded && p.deliveryObs != nil {
+			if carrier, ok := any(b).(delivery.Carrier); ok {
+				meta := carrier.DeliveryMetadata()
+				if !meta.Empty() {
+					p.deliveryObs(meta)
+				}
+			}
 		}
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+func (p *Pipeline[T]) newDeliveryAttempt(b T) *deliveryAttempt {
+	required := 0
+	for _, needed := range p.exporterNeeded {
+		if needed {
+			required++
+		}
+	}
+	if required == 0 || p.deliveryObs == nil {
+		return nil
+	}
+	carrier, ok := any(b).(delivery.Carrier)
+	if !ok {
+		return nil
+	}
+	meta := carrier.DeliveryMetadata()
+	if meta.Empty() {
+		return nil
+	}
+	attempt := &deliveryAttempt{meta: meta, observer: p.deliveryObs, failure: p.deliveryFail}
+	attempt.remaining.Store(int64(required))
+	return attempt
+}
+
+func (p *Pipeline[T]) notifyDeliveryFailure(b T, err error) bool {
+	if p.deliveryFail == nil || err == nil {
+		return false
+	}
+	carrier, ok := any(b).(delivery.Carrier)
+	if !ok {
+		return false
+	}
+	meta := carrier.DeliveryMetadata()
+	if !meta.Empty() {
+		p.deliveryFail(meta, err)
+		return true
+	}
+	return false
 }
 
 func (p *Pipeline[T]) reserveLaneBytes(i int, n int64) bool {

@@ -216,3 +216,38 @@ func TestSpansFromResourceSpans_MultipleResources(t *testing.T) {
 		t.Errorf("spans[1] service = %q", spans[1].Resource.ServiceName())
 	}
 }
+
+func TestSpansFromResourceSpans_PreservesResourceAndScopeMetadata(t *testing.T) {
+	rs := []*tracepb.ResourceSpans{{
+		SchemaUrl: "resource-schema",
+		Resource: &resourcepb.Resource{
+			DroppedAttributesCount: 2,
+		},
+		ScopeSpans: []*tracepb.ScopeSpans{{
+			SchemaUrl: "scope-schema",
+			Scope: &commonpb.InstrumentationScope{
+				Name:                   "library",
+				Version:                "1.0.0",
+				DroppedAttributesCount: 3,
+				Attributes: []*commonpb.KeyValue{{
+					Key: "scope.attr", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "value"}},
+				}},
+			},
+			Spans: []*tracepb.Span{{Name: "operation"}},
+		}},
+	}}
+	spans := spansFromResourceSpans(rs)
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d", len(spans))
+	}
+	span := spans[0]
+	if span.ResourceSchemaURL != "resource-schema" || span.ScopeSchemaURL != "scope-schema" {
+		t.Fatalf("schema URLs = %q/%q", span.ResourceSchemaURL, span.ScopeSchemaURL)
+	}
+	if span.Resource.DroppedAttributes != 2 || span.ScopeDroppedAttrs != 3 {
+		t.Fatalf("dropped metadata = %d/%d", span.Resource.DroppedAttributes, span.ScopeDroppedAttrs)
+	}
+	if span.ScopeName != "library" || span.ScopeVersion != "1.0.0" || len(span.ScopeAttributes) != 1 {
+		t.Fatalf("scope metadata = %+v", span)
+	}
+}

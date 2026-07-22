@@ -50,3 +50,24 @@ func TestAmberLogExporterExport(t *testing.T) {
 		t.Fatalf("unexpected log request: %+v", got)
 	}
 }
+
+func TestLogExporterPartialSuccessIsNotDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, _ := proto.Marshal(&collogspb.ExportLogsServiceResponse{
+			PartialSuccess: &collogspb.ExportLogsPartialSuccess{RejectedLogRecords: 1, ErrorMessage: "invalid record"},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	exporter, err := NewAmberExporter(server.URL, time.Second, RetryPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := Batch{ResourceLogs: []*logspb.ResourceLogs{{
+		ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{}}}},
+	}}}
+	if err := exporter.Export(context.Background(), batch); err == nil {
+		t.Fatal("partial success was treated as complete delivery")
+	}
+}

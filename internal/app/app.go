@@ -95,6 +95,9 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	if err := validateDurableDestinations(cfg, overrideExp != nil); err != nil {
+		return nil, err
+	}
 
 	p := pipeline.New[model.Batch](pipeline.Config{
 		Workers:    cfg.Pipeline.Workers,
@@ -144,14 +147,18 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 
 	traceActive := overrideExp != nil || len(cfg.Exporters) > 0
 	if overrideExp != nil {
-		p.AddExporter(overrideExp)
+		p.AddRequiredExporter(overrideExp)
 	} else {
 		for _, ec := range cfg.Exporters {
 			e, err := buildExporter(ec, a)
 			if err != nil {
 				return nil, fmt.Errorf("exporter %q: %w", ec.Type, err)
 			}
-			p.AddExporter(e)
+			if ec.Type == "amber" {
+				p.AddRequiredExporter(e)
+			} else {
+				p.AddExporter(e)
+			}
 		}
 	}
 
@@ -175,8 +182,66 @@ func newApp(cfg config.Config, logger *slog.Logger, overrideExp pipeline.Exporte
 	if err := a.addIngress(cfg.Receivers, cfg.TenantMap, cfg.TenantLimits, cfg.JournalPath, cfg.JournalMaxBytes, traceActive, validateSpanLimit(cfg.Processors)); err != nil {
 		return nil, fmt.Errorf("otlp ingress: %w", err)
 	}
+	if a.ingress != nil {
+		p.SetDeliveryObserver(a.ingress.DeliveryConfirmed)
+		p.SetDeliveryFailureObserver(a.ingress.DeliveryFailed)
+		if a.tailSampler != nil {
+			a.tailSampler.SetDropObserver(a.ingress.DeliveryConfirmed)
+		}
+		if a.metricPipeline != nil {
+			a.metricPipeline.SetDeliveryObserver(a.ingress.DeliveryConfirmed)
+			a.metricPipeline.SetDeliveryFailureObserver(a.ingress.DeliveryFailed)
+		}
+		if a.logPipeline != nil {
+			a.logPipeline.SetDeliveryObserver(a.ingress.DeliveryConfirmed)
+			a.logPipeline.SetDeliveryFailureObserver(a.ingress.DeliveryFailed)
+		}
+	}
 	constructed = true
 	return a, nil
+}
+
+func validateDurableDestinations(cfg config.Config, traceOverride bool) error {
+	if cfg.JournalPath == "" {
+		return nil
+	}
+	if !traceOverride && len(cfg.Exporters) > 0 {
+		required := false
+		for _, exporter := range cfg.Exporters {
+			if exporter.Type == "amber" {
+				required = true
+				break
+			}
+		}
+		if !required {
+			return errors.New("journal_path requires an Amber trace exporter")
+		}
+	}
+	if cfg.MetricPipeline != nil {
+		required := false
+		for _, exporter := range metricExporters(*cfg.MetricPipeline) {
+			if exporter.Type == "" || exporter.Type == "amber" {
+				required = true
+				break
+			}
+		}
+		if !required {
+			return errors.New("journal_path requires an Amber metric exporter")
+		}
+	}
+	if cfg.LogPipeline != nil {
+		required := false
+		for _, exporter := range logExporters(*cfg.LogPipeline) {
+			if exporter.Type == "" || exporter.Type == "amber" {
+				required = true
+				break
+			}
+		}
+		if !required {
+			return errors.New("journal_path requires an Amber log exporter")
+		}
+	}
+	return nil
 }
 
 func (a *App) closeUnstarted() {
@@ -327,7 +392,11 @@ func buildMetricPipeline(
 		if err != nil {
 			return nil, err
 		}
-		mp.AddExporter(exp)
+		if exporterCfg.Type == "" || exporterCfg.Type == "amber" {
+			mp.AddRequiredExporter(exp)
+		} else {
+			mp.AddExporter(exp)
+		}
 	}
 	return mp, nil
 }
@@ -393,7 +462,11 @@ func buildLogPipeline(
 		if err != nil {
 			return nil, err
 		}
-		lp.AddExporter(exp)
+		if exporterCfg.Type == "" || exporterCfg.Type == "amber" {
+			lp.AddRequiredExporter(exp)
+		} else {
+			lp.AddExporter(exp)
+		}
 	}
 	return lp, nil
 }
@@ -479,8 +552,7 @@ func (a *App) Ready(ctx context.Context) error {
 // Status returns a bounded, secret-free Gyre lifecycle snapshot.
 func (a *App) Status() gyre.Snapshot {
 	a.statusMu.RLock()
-	defer a.statusMu.RUnlock()
-	return gyre.Snapshot{
+	snapshot := gyre.Snapshot{
 		Name:       a.Name(),
 		Version:    a.Version(),
 		State:      a.state,
@@ -488,6 +560,19 @@ func (a *App) Status() gyre.Snapshot {
 		Since:      a.since,
 		Conditions: []gyre.Condition{a.condition},
 	}
+	a.statusMu.RUnlock()
+	if snapshot.State == gyre.StateReady && a.ingress != nil {
+		durability := a.ingress.DurabilityStats()
+		if durability.Enabled && !durability.Healthy {
+			snapshot.State = gyre.StateDegraded
+			snapshot.Conditions = []gyre.Condition{{
+				Type: "Ready", Status: false, Reason: durability.Reason,
+				Message:        "durable delivery requires operator attention",
+				LastTransition: snapshot.Since,
+			}}
+		}
+	}
+	return snapshot
 }
 
 func (a *App) Start(ctx context.Context) error {
@@ -544,6 +629,7 @@ func (a *App) Start(ctx context.Context) error {
 	if a.ingress != nil {
 		if err := a.ingress.ReplayRouted(func(env journal.Envelope) error {
 			return otlprecv.ReplayEnvelope(ctx, env, otlprecv.ReplaySinks{
+				Track:  a.ingress.TrackJournalRecord,
 				Traces: a.pipeline.Enqueue,
 				Metrics: func(c context.Context, b metric.Batch) error {
 					if a.metricPipeline == nil {
@@ -560,9 +646,6 @@ func (a *App) Start(ctx context.Context) error {
 			})
 		}); err != nil {
 			return a.startFailed("journal_replay", err)
-		}
-		if err := a.ingress.CompactJournal(); err != nil {
-			return a.startFailed("journal_compact", err)
 		}
 		if err := a.ingress.Start(); err != nil {
 			return a.startFailed("otlp_ingress", err)
@@ -600,7 +683,14 @@ func (a *App) Close(ctx context.Context) error {
 		a.closeDone = make(chan struct{})
 		if !a.startAttempted {
 			a.transition(gyre.StateStopping, "close_before_start", "component was closed before startup")
-			a.transition(gyre.StateStopped, "stopped", "component is stopped")
+			if a.ingress != nil {
+				a.closeErr = a.ingress.CloseJournal()
+			}
+			if a.closeErr != nil {
+				a.transition(gyre.StateFailed, "shutdown_failed", "admission journal failed to close")
+			} else {
+				a.transition(gyre.StateStopped, "stopped", "component is stopped")
+			}
 			close(a.closeDone)
 		} else {
 			a.transition(gyre.StateStopping, "shutdown", "component shutdown is in progress")
@@ -639,7 +729,7 @@ func (a *App) shutdownStarted(ctx context.Context) error {
 	// Stop accepting first: after Stop returns no ingress handler is mid-Enqueue,
 	// so it is safe to close the pipeline queues below.
 	if a.ingressStarted {
-		if err := a.ingress.Stop(ctx); err != nil {
+		if err := a.ingress.StopServing(ctx); err != nil {
 			a.logger.Error("otlp ingress stop error", "err", err)
 			errs = append(errs, fmt.Errorf("otlp ingress: %w", err))
 		}
@@ -662,6 +752,11 @@ func (a *App) shutdownStarted(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("metric pipeline: %w", err))
 		}
 		a.metricStarted = false
+	}
+	if a.ingress != nil {
+		if err := a.ingress.CloseJournal(); err != nil {
+			errs = append(errs, fmt.Errorf("close admission journal: %w", err))
+		}
 	}
 	for i := a.startedHooks - 1; i >= 0; i-- {
 		if a.hooks[i].stop == nil {
@@ -828,6 +923,28 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 			_, _ = fmt.Fprintf(w, "# TYPE coral_log_exporter_batches_dropped counter\ncoral_log_exporter_batches_dropped %d\n", a.logPipeline.ExporterDrops())
 		}
 		if a.ingress != nil {
+			durable := a.ingress.DurabilityStats()
+			durableHealthy := 0
+			if durable.Healthy {
+				durableHealthy = 1
+			}
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_healthy gauge\ncoral_journal_healthy %d\n", durableHealthy)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_bytes gauge\ncoral_journal_bytes %d\n", durable.ActiveBytes)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_max_bytes gauge\ncoral_journal_max_bytes %d\n", durable.ActiveMaxBytes)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_records gauge\ncoral_journal_records %d\n", durable.ActiveRecords)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_oldest_age_seconds gauge\ncoral_journal_oldest_age_seconds %.6f\n", durable.ActiveOldestAge.Seconds())
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_pending_attempts gauge\ncoral_journal_pending_attempts %d\n", durable.PendingAttempts)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_retry_scheduled gauge\ncoral_journal_retry_scheduled %d\n", durable.RetryScheduled)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_ack_pending gauge\ncoral_journal_ack_pending %d\n", durable.AckReady)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_ack_errors_total counter\ncoral_journal_ack_errors_total %d\n", durable.AckErrors)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_receipt_bytes gauge\ncoral_journal_receipt_bytes %d\n", durable.ReceiptBytes)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_receipts gauge\ncoral_journal_receipts %d\n", durable.ReceiptRecords)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_quarantine_bytes gauge\ncoral_journal_quarantine_bytes %d\n", durable.QuarantineBytes)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_quarantine_records gauge\ncoral_journal_quarantine_records %d\n", durable.QuarantineRecords)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_redispatch_attempts_total counter\ncoral_journal_redispatch_attempts_total %d\n", durable.RedispatchAttempts)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_redispatch_successes_total counter\ncoral_journal_redispatch_successes_total %d\n", durable.RedispatchSuccesses)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_redispatch_failures_total counter\ncoral_journal_redispatch_failures_total %d\n", durable.RedispatchFailures)
+			_, _ = fmt.Fprintf(w, "# TYPE coral_journal_quarantined_total counter\ncoral_journal_quarantined_total %d\n", durable.QuarantinedTotal)
 			req, errs, accSpans, accPoints, accRecords := a.ingress.Stats()
 			rejSpans, rejPoints, rejRecords := a.ingress.Rejected()
 			logLimitRejected := a.ingress.LogLimitRejected()

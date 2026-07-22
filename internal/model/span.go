@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/yaop-labs/coral/internal/delivery"
 )
 
 type TraceID [16]byte
@@ -152,7 +154,8 @@ func (v AttributeValue) MarshalJSON() ([]byte, error) {
 }
 
 type Resource struct {
-	Attrs []Attribute
+	Attrs             []Attribute
+	DroppedAttributes uint32
 }
 
 func (r Resource) ServiceName() string { return r.AttrValue("service.name") }
@@ -230,11 +233,24 @@ type Span struct {
 	OTLP              []byte
 	ScopeName         string
 	ScopeVersion      string
+	ScopeAttributes   []Attribute
+	ScopeDroppedAttrs uint32
+	// SchemaURL is retained for compatibility with spans created before Coral
+	// tracked resource and scope schema URLs independently.
 	SchemaURL         string
+	ResourceSchemaURL string
+	ScopeSchemaURL    string
 	TraceFlags        uint32
 	DroppedAttributes uint32
 	DroppedEvents     uint32
 	DroppedLinks      uint32
+
+	// JournalRecordID and Tenant are internal delivery metadata and are never
+	// serialized to OTLP. Span granularity lets batch and tail-sampling
+	// processors split and merge work without losing parent ownership.
+	JournalRecordID string
+	DeliveryAttempt uint64
+	Tenant          string
 }
 
 func (s Span) Duration() time.Duration { return s.EndTime.Sub(s.StartTime) }
@@ -250,14 +266,23 @@ func (s Span) AttrValue(key string) string {
 	return ""
 }
 
-// SizeBytes returns a rough byte estimate of the span for memory accounting.
+// SizeBytes returns a conservative byte estimate of the span for memory
+// accounting. OTLP contains nested events, links, trace state, and attributes
+// that are intentionally retained alongside the normalized fields, so the raw
+// representation must be included even though this double-counts some data.
 func (s Span) SizeBytes() int {
 	n := 64 // fixed fields
-	n += len(s.Name) + len(s.StatusMsg)
+	n += len(s.Name) + len(s.StatusMsg) + len(s.OTLP)
+	n += len(s.ScopeName) + len(s.ScopeVersion) + len(s.SchemaURL)
+	n += len(s.ResourceSchemaURL) + len(s.ScopeSchemaURL)
+	n += len(s.JournalRecordID) + len(s.Tenant)
 	for _, a := range s.Resource.Attrs {
 		n += len(a.Key) + a.Value.SizeBytes()
 	}
 	for _, a := range s.Attrs {
+		n += len(a.Key) + a.Value.SizeBytes()
+	}
+	for _, a := range s.ScopeAttributes {
 		n += len(a.Key) + a.Value.SizeBytes()
 	}
 	return n
@@ -265,6 +290,32 @@ func (s Span) SizeBytes() int {
 
 type Batch struct {
 	Spans []Span
+}
+
+// DeliveryMetadata aggregates span-level durable ownership for this exporter
+// batch. A record is complete only after all contributed span units reach a
+// terminal outcome.
+func (b Batch) DeliveryMetadata() delivery.Metadata {
+	type recordAttempt struct {
+		id      string
+		attempt uint64
+	}
+	counts := make(map[recordAttempt]int)
+	tenant := ""
+	for i := range b.Spans {
+		s := &b.Spans[i]
+		if tenant == "" {
+			tenant = s.Tenant
+		}
+		if s.JournalRecordID != "" {
+			counts[recordAttempt{id: s.JournalRecordID, attempt: s.DeliveryAttempt}]++
+		}
+	}
+	meta := delivery.Metadata{Tenant: tenant, Records: make([]delivery.RecordContribution, 0, len(counts))}
+	for record, units := range counts {
+		meta.Records = append(meta.Records, delivery.RecordContribution{RecordID: record.id, Attempt: record.attempt, Units: units})
+	}
+	return meta
 }
 
 // SizeBytes returns the bounded in-memory estimate used for queue admission.

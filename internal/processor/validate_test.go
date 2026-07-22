@@ -5,6 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/yaop-labs/coral/internal/model"
 )
 
@@ -55,6 +59,38 @@ func TestValidateProcessor_CredsRedacted(t *testing.T) {
 	}
 	if got.Spans[0].AttrValue("keep") != "yes" {
 		t.Error("non-secret attribute should be preserved")
+	}
+}
+
+func TestValidateProcessor_RedactsNestedEventAndLinkAttributes(t *testing.T) {
+	p, err := NewValidate(1<<20, []string{`(?i)password|authorization`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := proto.Marshal(&tracepb.Span{
+		Events: []*tracepb.Span_Event{{Attributes: []*commonpb.KeyValue{{
+			Key: "db.password", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "secret"}},
+		}}}},
+		Links: []*tracepb.Span_Link{{Attributes: []*commonpb.KeyValue{{
+			Key: "authorization", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "bearer secret"}},
+		}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Process(context.Background(), model.Batch{Spans: []model.Span{{Name: "nested", OTLP: raw}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out tracepb.Span
+	if err := proto.Unmarshal(got.Spans[0].OTLP, &out); err != nil {
+		t.Fatal(err)
+	}
+	if value := out.GetEvents()[0].GetAttributes()[0].GetValue().GetStringValue(); value != "[REDACTED]" {
+		t.Fatalf("event secret = %q", value)
+	}
+	if value := out.GetLinks()[0].GetAttributes()[0].GetValue().GetStringValue(); value != "[REDACTED]" {
+		t.Fatalf("link secret = %q", value)
 	}
 }
 

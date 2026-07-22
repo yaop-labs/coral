@@ -8,6 +8,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
+	"github.com/yaop-labs/coral/internal/delivery"
 	"github.com/yaop-labs/coral/internal/model"
 )
 
@@ -17,6 +18,9 @@ const (
 	decisionPending decision = iota
 	decisionKeep
 	decisionDrop
+	// decisionEvictedDrop records an early capacity decision for late-span
+	// accounting without treating it as a durable policy completion.
+	decisionEvictedDrop
 )
 
 // Rule decides whether a pending trace should be kept.
@@ -77,6 +81,7 @@ type TailSampler struct {
 	defaultRate  float64
 	rules        []Rule
 	export       func(context.Context, model.Batch) error
+	dropObserver func(delivery.Metadata)
 
 	mu      sync.Mutex
 	pending map[traceKey]*PendingTrace
@@ -151,20 +156,37 @@ func (ts *TailSampler) SetTenantExtractor(fn func(context.Context) string) {
 	ts.mu.Unlock()
 }
 
+// SetDropObserver reports intentional sampling drops as terminal outcomes.
+// Capacity evictions are deliberately not reported: they remain unconfirmed
+// in the durable journal and can be retried instead of being mislabeled as a
+// policy decision.
+func (ts *TailSampler) SetDropObserver(fn func(delivery.Metadata)) {
+	ts.mu.Lock()
+	ts.dropObserver = fn
+	ts.mu.Unlock()
+}
+
 // Process buffers spans by trace ID and returns an empty batch.
 // Decided traces are emitted asynchronously via the export function.
 func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch, error) {
 	var emit []model.Batch
+	var dropped []model.Batch
 
 	ts.mu.Lock()
 	now := ts.now()
-	tenant := ts.tenant(ctx)
 	for _, s := range b.Spans {
+		tenant := s.Tenant
+		if tenant == "" {
+			tenant = ts.tenant(ctx)
+		}
 		key := traceKey{tenant: tenant, id: s.TraceID}
 		if d, ok := ts.decided.Get(key); ok {
 			ts.lateSpans++
-			if d == decisionKeep {
+			switch d {
+			case decisionKeep:
 				emit = append(emit, model.Batch{Spans: []model.Span{s}})
+			case decisionDrop:
+				dropped = append(dropped, model.Batch{Spans: []model.Span{s}})
 			}
 			continue
 		}
@@ -175,10 +197,12 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 					ts.evictions++
 					ts.currentBytes -= pendingBytes(evicted)
 					d := ts.decide(evicted)
-					ts.decided.Add(traceKey{tenant: evicted.Tenant, id: evicted.ID}, d)
 					if d == decisionKeep {
 						emit = append(emit, model.Batch{Spans: evicted.Spans})
+					} else {
+						d = decisionEvictedDrop
 					}
+					ts.decided.Add(traceKey{tenant: evicted.Tenant, id: evicted.ID}, d)
 				}
 			}
 			pt = &PendingTrace{ID: s.TraceID, Tenant: tenant, FirstSeen: now}
@@ -199,7 +223,20 @@ func (ts *TailSampler) Process(ctx context.Context, b model.Batch) (model.Batch,
 	for _, batch := range emit {
 		_ = ts.export(ctx, batch)
 	}
+	for _, batch := range dropped {
+		ts.observeDrop(batch)
+	}
 	return model.Batch{}, nil
+}
+
+func (ts *TailSampler) observeDrop(batch model.Batch) {
+	if ts.dropObserver == nil {
+		return
+	}
+	meta := batch.DeliveryMetadata()
+	if !meta.Empty() {
+		ts.dropObserver(meta)
+	}
 }
 
 func (ts *TailSampler) evictOldestLocked() *PendingTrace {
@@ -262,6 +299,8 @@ func (ts *TailSampler) tickAt(ctx context.Context, now time.Time) {
 		ts.decided.Add(traceKey{tenant: pt.Tenant, id: pt.ID}, d)
 		if d == decisionKeep {
 			_ = ts.export(ctx, model.Batch{Spans: pt.Spans})
+		} else {
+			ts.observeDrop(model.Batch{Spans: pt.Spans})
 		}
 	}
 }

@@ -51,7 +51,7 @@ func (p Policy) Do(ctx context.Context, fn func(context.Context) error) error {
 		if err == nil {
 			return nil
 		}
-		if isPermanent(err) {
+		if IsPermanent(err) {
 			return err
 		}
 		if attempt == p.MaxAttempts {
@@ -99,7 +99,9 @@ func Permanent(err error) error {
 	return &permanent{err: err}
 }
 
-func isPermanent(err error) bool {
+// IsPermanent reports whether err is classified as non-retryable by the
+// exporter protocol layer.
+func IsPermanent(err error) bool {
 	var p *permanent
 	return errors.As(err, &p)
 }

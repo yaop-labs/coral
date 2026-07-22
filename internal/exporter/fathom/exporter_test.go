@@ -2,6 +2,7 @@ package fathom
 
 import (
 	"context"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 	"net/http"
@@ -38,6 +39,24 @@ func TestExporterExport(t *testing.T) {
 	}
 	if gotBytes == 0 {
 		t.Fatal("expected protobuf body")
+	}
+}
+
+func TestExporterPartialSuccessIsNotDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, _ := proto.Marshal(&coltracepb.ExportTraceServiceResponse{
+			PartialSuccess: &coltracepb.ExportTracePartialSuccess{RejectedSpans: 1, ErrorMessage: "invalid span"},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	exporter, err := New(server.URL, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exporter.Export(context.Background(), model.Batch{Spans: []model.Span{testSpan()}}); err == nil {
+		t.Fatal("partial success was treated as complete delivery")
 	}
 }
 

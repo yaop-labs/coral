@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/yaop-labs/coral/internal/exporter/backoff"
@@ -65,11 +66,26 @@ func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
 		return fmt.Errorf("fathom: post: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return backoff.StatusError(resp.StatusCode, resp.Header, "fathom: "+strings.TrimSpace(string(snippet)))
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return fmt.Errorf("fathom: read response: %w", readErr)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 300 {
+		if len(responseBody) > 256 {
+			responseBody = responseBody[:256]
+		}
+		return backoff.StatusError(resp.StatusCode, resp.Header, "fathom: "+strings.TrimSpace(string(responseBody)))
+	}
+	var response coltracepb.ExportTraceServiceResponse
+	if err := proto.Unmarshal(responseBody, &response); err != nil {
+		return backoff.Permanent(fmt.Errorf("fathom: invalid OTLP response: %w", err))
+	}
+	if partial := response.GetPartialSuccess(); partial != nil && partial.GetRejectedSpans() > 0 {
+		return backoff.Permanent(fmt.Errorf(
+			"fathom: partial success rejected_spans=%d: %s",
+			partial.GetRejectedSpans(), partial.GetErrorMessage(),
+		))
+	}
 	return nil
 }
 

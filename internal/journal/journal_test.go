@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"os/exec"
@@ -33,6 +34,29 @@ func TestReplayRejectsOversizedRecordBeforeAllocation(t *testing.T) {
 	}
 	if err := j.Replay(func([]byte) error { t.Fatal("unexpected replay callback"); return nil }); err == nil {
 		t.Fatal("oversized record accepted")
+	}
+}
+
+func TestRecoverRejectsOversizedRecordBeforeAllocation(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "journal")
+	j, err := Open(p, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var hdr [8]byte
+	binary.BigEndian.PutUint32(hdr[:4], maxJournalRecordBytes+1)
+	if _, err := j.f.Write(hdr[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Recover(func([]byte) error {
+		t.Fatal("unexpected recover callback")
+		return nil
+	}); !errors.Is(err, ErrRecordTooLarge) {
+		t.Fatalf("recover error = %v, want ErrRecordTooLarge", err)
 	}
 }
 
@@ -277,12 +301,18 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestEnvelopeDeliveryIDRoundTrip(t *testing.T) {
-	want := Envelope{Signal: "logs", Tenant: "tenant-a", DeliveryID: "0123456789abcdef0123456789abcdef", CreatedUnixNano: 42, Payload: []byte("body")}
+	want := Envelope{
+		Signal: "logs", Tenant: "tenant-a",
+		DeliveryID:    "0123456789abcdef0123456789abcdef",
+		RecordID:      "fedcba9876543210fedcba9876543210",
+		RequestDigest: "abc123", FailureReason: "permanent rejection",
+		CreatedUnixNano: 42, QuarantinedUnixNano: 84, Payload: []byte("body"),
+	}
 	got, err := DecodeEnvelope(EncodeEnvelope(want))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.DeliveryID != want.DeliveryID || got.Signal != want.Signal || got.Tenant != want.Tenant || string(got.Payload) != string(want.Payload) {
+	if got.DeliveryID != want.DeliveryID || got.RecordID != want.RecordID || got.RequestDigest != want.RequestDigest || got.FailureReason != want.FailureReason || got.QuarantinedUnixNano != want.QuarantinedUnixNano || got.Signal != want.Signal || got.Tenant != want.Tenant || string(got.Payload) != string(want.Payload) {
 		t.Fatalf("round trip = %+v", got)
 	}
 }
@@ -293,6 +323,190 @@ func TestEncodeEnvelopeRejectsOversizedRoutingFields(t *testing.T) {
 	}
 	if got := EncodeEnvelope(Envelope{Tenant: string(make([]byte, 256))}); got != nil {
 		t.Fatal("oversized tenant encoded")
+	}
+	if got := EncodeEnvelope(Envelope{RecordID: string(make([]byte, 256))}); got != nil {
+		t.Fatal("oversized record id encoded")
+	}
+	if got := EncodeEnvelope(Envelope{FailureReason: string(make([]byte, 4097))}); got != nil {
+		t.Fatal("oversized failure reason encoded")
+	}
+}
+
+func TestRecordStatsAndLookupEnvelope(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	old := time.Now().Add(-time.Minute).Truncate(time.Nanosecond)
+	first, err := j.AppendEnvelope(Envelope{Signal: "traces", CreatedUnixNano: old.UnixNano(), Payload: []byte("one")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.AppendEnvelope(Envelope{Signal: "logs", Payload: []byte("two")}); err != nil {
+		t.Fatal(err)
+	}
+	records, oldest, err := j.RecordStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records != 2 || !oldest.Equal(old) {
+		t.Fatalf("record stats = (%d, %s), want (2, %s)", records, oldest, old)
+	}
+	got, found, err := j.LookupEnvelope(first.RecordID)
+	if err != nil || !found || string(got.Payload) != "one" {
+		t.Fatalf("lookup = (%+v, %t, %v)", got, found, err)
+	}
+}
+
+func TestAppendEnvelopeAssignsStableRecordID(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+
+	stored, err := j.AppendEnvelope(Envelope{Signal: "traces", Payload: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.RecordID) != 32 {
+		t.Fatalf("record id = %q", stored.RecordID)
+	}
+	if stored.CreatedUnixNano == 0 {
+		t.Fatal("created timestamp was not assigned")
+	}
+
+	var replayed Envelope
+	if err := j.Replay(func(raw []byte) error {
+		replayed, err = DecodeEnvelope(raw)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.RecordID != stored.RecordID {
+		t.Fatalf("replayed record id = %q, want %q", replayed.RecordID, stored.RecordID)
+	}
+}
+
+func TestAcknowledgeRetainsOnlyUnconfirmedRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "j.log")
+	j, err := Open(path, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := j.AppendEnvelope(Envelope{Signal: "traces", Payload: []byte("one")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := j.AppendEnvelope(Envelope{Signal: "logs", Payload: []byte("two")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	three, err := j.AppendEnvelope(Envelope{Signal: "metrics", Payload: []byte("three")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := j.Acknowledge(two.RecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("existing record was not acknowledged")
+	}
+	if removed, err = j.Acknowledge(two.RecordID); err != nil || removed {
+		t.Fatalf("idempotent acknowledge = (%t, %v)", removed, err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err = Open(path, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var ids []string
+	if err := j.Replay(func(raw []byte) error {
+		env, err := DecodeEnvelope(raw)
+		if err == nil {
+			ids = append(ids, env.RecordID)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != one.RecordID || ids[1] != three.RecordID {
+		t.Fatalf("retained ids = %#v", ids)
+	}
+}
+
+func TestAcknowledgeFsyncFailureRetainsRecord(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	stored, err := j.AppendEnvelope(Envelope{Signal: "traces", Payload: []byte("keep")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.syncFn = func() error { return os.ErrPermission }
+	if removed, err := j.Acknowledge(stored.RecordID); err == nil || removed {
+		t.Fatalf("acknowledge despite fsync failure = (%t, %v)", removed, err)
+	}
+	j.syncFn = j.f.Sync
+	var count int
+	if err := j.Replay(func([]byte) error { count++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("records after failed acknowledge = %d", count)
+	}
+}
+
+func TestEnsureRecordIDsMigratesLegacyRecordsOnce(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "j.log"), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	if err := j.Append(EncodeEnvelope(Envelope{Signal: "traces", Payload: []byte("legacy")})); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.EnsureRecordIDs(); err != nil {
+		t.Fatal(err)
+	}
+	var first string
+	if err := j.Replay(func(raw []byte) error {
+		env, err := DecodeEnvelope(raw)
+		first = env.RecordID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 32 {
+		t.Fatalf("migrated record id = %q", first)
+	}
+	bytesBefore, _ := j.Stats()
+	if err := j.EnsureRecordIDs(); err != nil {
+		t.Fatal(err)
+	}
+	bytesAfter, _ := j.Stats()
+	if bytesAfter != bytesBefore {
+		t.Fatalf("second migration changed size: %d -> %d", bytesBefore, bytesAfter)
+	}
+	var second string
+	if err := j.Replay(func(raw []byte) error {
+		env, err := DecodeEnvelope(raw)
+		second = env.RecordID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("record id changed: %q -> %q", first, second)
 	}
 }
 

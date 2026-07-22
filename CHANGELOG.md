@@ -6,6 +6,42 @@ tested, documented increment.
 
 ## Unreleased
 
+### Documentation
+
+- Consolidated the 2026-07-07 platform pass, 2026-07-09/10 code review,
+  contract-conformance fixes, merged feature branches, and 2026-07-18
+  capability run into a single engineering history.
+- Re-baselined the engineering review against `main` at `f0868e1` and replaced
+  stale completion claims with evidence-backed current status.
+- Defined the stable single-node capability gates: delivery-owned journal
+  retention, exact bounds/routing, lossless Amber semantics, and operational
+  failure proof.
+- Corrected the README durability wording and recorded the completed Gate 1
+  boundary separately from the remaining stable-release gates.
+
+### Fixed
+
+- Closed Gate 1 with stable internal journal record IDs, canonical
+  post-admission append-before-enqueue, required-Amber completion across
+  batching/sampling/fan-out, and atomic per-record reclaim that preserves every
+  unconfirmed record. Added bounded live redispatch, durable Wisp receipts,
+  permanent-failure quarantine, crash reconciliation, journal-aware readiness,
+  and bounded durability metrics.
+
+- Applied journal record-size limits before startup recovery allocations,
+  matching the bounded replay path for corrupt on-disk headers.
+- Included retained raw OTLP and scope/schema strings in trace memory
+  accounting used by queue, exporter-lane, and tail-sampler byte budgets.
+- Preserved separate resource/scope schema metadata, scope attributes, trace
+  state, flags, events, links, and dropped counts on the Amber source-of-truth
+  trace path as well as the Fathom path.
+- Redacted nested trace event and link attributes in retained raw OTLP before
+  downstream conversion, preventing fidelity preservation from bypassing the
+  configured privacy policy.
+- Decoded Amber and Fathom OTLP success bodies for every signal and classified
+  non-zero downstream partial-success rejection as incomplete permanent
+  delivery instead of silently counting the whole batch as delivered.
+
 ### Added
 
 - Bounded per-tenant request-rate quotas (`max_requests_per_second`) with

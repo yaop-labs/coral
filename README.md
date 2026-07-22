@@ -16,17 +16,28 @@ component contract; Reef remains the transport-security owner.
 
 ## Delivery semantics
 
-Delivery without `journal_path` is **at-most-once within Coral**: batches are
-dropped on backpressure or shutdown rather than persisted. When the bounded
-`journal_path` is configured, admission is fsync-backed and restart replay is
-at-least-once within the documented journal/dedup boundaries. Wisp's spool and
-Amber's WAL remain durable at their own boundaries. Partially-invalid payloads
-are answered `200 + partial_success` so
-senders do not retry rejected records (contract §4).
+Delivery without `journal_path` is **at-most-once within Coral**: batches can be
+dropped on backpressure, exporter failure, process failure, or forced shutdown.
+The optional `journal_path` now fsyncs a canonical post-admission envelope
+before enqueue and removes it only after required Amber delivery succeeds.
+Transient required-delivery failures are redispatched from the journal without
+a restart. Permanent failures, including non-zero Amber OTLP partial success,
+move to `<journal_path>.quarantine`; bounded Wisp response-loss receipts live in
+`<journal_path>.receipts`. Crashes between either sidecar append and active
+record removal are reconciled on startup. Journal pressure, pending retry/ack,
+and quarantine degrade readiness and are exposed by `coral_journal_*` metrics.
+This closes Coral's single-node delivery-ownership gate; the full stable release
+still depends on the remaining bounds/routing, Amber compatibility, and
+operability gates.
+Supported item-level trace rejections are answered with
+`partial_success`; complete item-level log/metric aggregation remains a release
+protocol gate.
 
-Fan-out destinations have independent bounded queues. A slow or retrying
-destination can drop from its own queue, but cannot delay delivery to the other
-exporters.
+Fan-out destinations have independent bounded queues. Amber is required;
+Fathom, S3, and devnull are best-effort. A required-lane failure retains its
+journal record, while an optional destination cannot block Amber completion.
+When `journal_path` is enabled, every active signal pipeline must configure an
+Amber exporter; Coral rejects a best-effort-only durable configuration.
 
 ### Tenant admission limits
 
@@ -103,7 +114,7 @@ then share the standard OTLP ports.
 Go toolchain. `/metrics` exposes the same process-constant identity plus
 readiness state and per-signal input queue depth/capacity.
 
-Run the complete local gate with:
+Run the local source gate with:
 
 ```sh
 make verify
@@ -112,8 +123,10 @@ make fuzz
 
 Release packages are deterministic `.tar.gz` archives built by
 `scripts/package.sh`; tag builds publish archives and `SHA256SUMS` only after
-the release gate passes. The current architecture review, responsibility
-boundaries, and capability plan are in
+the release gate passes. Coral has not cut a release tag yet. The consolidated
+engineering history, current review, responsibility boundaries, and stable
+stabilization plan are in
+[`docs/HISTORY.md`](docs/HISTORY.md),
 [`docs/REVIEW.md`](docs/REVIEW.md),
 [`ADR 0001`](docs/adr/0001-coral-role-and-boundaries.md), and
 [`docs/ROADMAP.md`](docs/ROADMAP.md). Cross-repository Gyre/Reef/Wisp boundaries

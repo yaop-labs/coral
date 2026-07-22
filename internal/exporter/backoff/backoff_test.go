@@ -10,13 +10,13 @@ import (
 
 func TestStatusError_PermanentVsRetryable(t *testing.T) {
 	for _, code := range []int{400, 401, 403, 404, 413, 500, 501} {
-		if err := StatusError(code, nil, "x"); !isPermanent(err) {
+		if err := StatusError(code, nil, "x"); !IsPermanent(err) {
 			t.Errorf("status %d should be permanent (not retried)", code)
 		}
 	}
 	for _, code := range []int{429, 502, 503, 504} {
 		err := StatusError(code, nil, "x")
-		if err == nil || isPermanent(err) {
+		if err == nil || IsPermanent(err) {
 			t.Errorf("status %d should be retryable", code)
 		}
 	}

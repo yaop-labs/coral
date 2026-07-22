@@ -12,6 +12,7 @@ import (
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 
 	"github.com/yaop-labs/coral/internal/model"
 	"github.com/yaop-labs/reef/bearer"
@@ -101,6 +102,24 @@ func TestAmberExporter_ServerError(t *testing.T) {
 	}
 }
 
+func TestAmberExporter_PartialSuccessIsNotDelivery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, _ := proto.Marshal(&coltracepb.ExportTraceServiceResponse{
+			PartialSuccess: &coltracepb.ExportTracePartialSuccess{RejectedSpans: 1, ErrorMessage: "invalid span"},
+		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	exp, err := New(srv.URL, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exp.Export(context.Background(), model.Batch{Spans: []model.Span{{Name: "rejected"}}}); err == nil {
+		t.Fatal("partial success was treated as complete delivery")
+	}
+}
+
 func TestAmberExporter_EmptyEndpoint(t *testing.T) {
 	if _, err := New("", 0); err == nil {
 		t.Fatal("expected error for empty endpoint")
@@ -135,6 +154,64 @@ func TestToTraceRequest_RootSpanHasNoParent(t *testing.T) {
 	sp := req.ResourceSpans[0].ScopeSpans[0].Spans[0]
 	if len(sp.ParentSpanId) != 0 {
 		t.Errorf("root span should have empty parent_span_id, got %x", sp.ParentSpanId)
+	}
+}
+
+func TestToTraceRequestPreservesMaximalOTLPMetadata(t *testing.T) {
+	rawSpan := &tracepb.Span{
+		TraceState: "vendor=value",
+		Events: []*tracepb.Span_Event{{
+			Name: "exception",
+			Attributes: []*commonpb.KeyValue{{
+				Key: "exception.type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "timeout"}},
+			}},
+		}},
+		Links: []*tracepb.Span_Link{{TraceId: []byte{1}, SpanId: []byte{2}}},
+	}
+	raw, err := proto.Marshal(rawSpan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := model.Span{
+		TraceID:           model.TraceID{1},
+		SpanID:            model.SpanID{2},
+		Name:              "normalized",
+		OTLP:              raw,
+		TraceFlags:        1,
+		DroppedAttributes: 2,
+		DroppedEvents:     3,
+		DroppedLinks:      4,
+		ResourceSchemaURL: "resource-schema",
+		ScopeSchemaURL:    "scope-schema",
+		ScopeName:         "client-library",
+		ScopeVersion:      "1.2.3",
+		ScopeDroppedAttrs: 5,
+		ScopeAttributes:   []model.Attribute{model.StringAttr("scope.attr", "value")},
+		Resource: model.Resource{
+			Attrs:             []model.Attribute{model.StringAttr("service.name", "checkout")},
+			DroppedAttributes: 6,
+		},
+	}
+	req := toTraceRequest(model.Batch{Spans: []model.Span{s}})
+	rs := req.GetResourceSpans()[0]
+	ss := rs.GetScopeSpans()[0]
+	out := ss.GetSpans()[0]
+	if rs.GetSchemaUrl() != "resource-schema" || rs.GetResource().GetDroppedAttributesCount() != 6 {
+		t.Fatalf("resource metadata lost: schema=%q dropped=%d", rs.GetSchemaUrl(), rs.GetResource().GetDroppedAttributesCount())
+	}
+	if ss.GetSchemaUrl() != "scope-schema" || ss.GetScope().GetName() != "client-library" ||
+		ss.GetScope().GetVersion() != "1.2.3" || ss.GetScope().GetDroppedAttributesCount() != 5 {
+		t.Fatalf("scope metadata lost: %+v", ss)
+	}
+	if got := attr(ss.GetScope().GetAttributes(), "scope.attr").GetStringValue(); got != "value" {
+		t.Fatalf("scope attribute = %q", got)
+	}
+	if out.GetTraceState() != "vendor=value" || len(out.GetEvents()) != 1 || len(out.GetLinks()) != 1 {
+		t.Fatalf("raw span metadata lost: %+v", out)
+	}
+	if out.GetFlags() != 1 || out.GetDroppedAttributesCount() != 2 ||
+		out.GetDroppedEventsCount() != 3 || out.GetDroppedLinksCount() != 4 {
+		t.Fatalf("span counters/flags lost: %+v", out)
 	}
 }
 

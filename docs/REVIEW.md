@@ -1,244 +1,180 @@
-# Coral architecture and engineering review
+# Coral current engineering review
 
-Review date: 2026-07-18  
-Reviewed commit: `35f920f` on `fix/contract-conformance`  
-Working baseline: `feat/operational-baseline`
+Review date: 2026-07-22
+
+Reviewed baseline: `f0868e1994c818e098afd0161401856f970c38a0` on `main`.
+Gate 1 closure below also covers the current uncommitted working tree.
+
+Target: stable single-node Coral with a version chosen from the completed
+capability and compatibility impact, not assigned in advance
 
 ## Executive result
 
-Coral is a small Go collector (about 12.4k lines including tests) with a useful
-OTLP/legacy ingestion and fan-out core. The current branch materially improves
-the repository baseline: one OTLP endpoint serves all three signals, Reef
-provides TLS/bearer protection, HTTP payloads are bounded, exporter retries are
-classified, fan-out queues are isolated, trace oversize rejection is returned
-as OTLP partial success, and the race test suite passes.
+Coral has a strong collector core: standard three-signal OTLP ingress, legacy
+trace receivers, bounded generic pipelines, isolated fan-out, Reef security,
+Gyre lifecycle, admission controls, Wisp delivery metadata, and broad race and
+failure-injection coverage. A rewrite is not justified.
 
-It is not production-ready. The largest blockers are the non-durable
-acknowledgement gap, absence of tenant identity/isolation, count-only memory
-bounds, lossy OTLP trace conversion, missing Wisp envelope semantics, incomplete
-partial-success propagation, shutdown data loss, and the absence of CI/release
-metadata.
+Coral is not ready to tag as stable yet, but Gate 1 is closed. The journal now
+owns the single-node handoff from an acknowledged OTLP admission through
+required Amber acceptance or durable quarantine. It performs bounded live
+redispatch, persists response-loss receipts, reconciles interrupted state
+transitions, and reports pressure/failure through readiness and metrics. The
+remaining release blockers are exact stateful bounds/routing, real Amber
+fidelity proof, legacy listener policy, and the operational release gate.
 
-Facts below are statements verified in code or repository state. Proposed
-directions are explicitly labelled as decisions or assumptions.
+The current stabilization scope is single-node production operation. Horizontal
+scale, a control-plane API, and a full organisation/project model remain later
+work and are not required to make the single-node contract honest.
 
 ## Verified capabilities
 
-- One optional gRPC and one optional HTTP OTLP ingress serve traces, metrics,
-  and logs (`internal/receiver/otlp/ingress.go:139-227`).
-- OTLP/HTTP supports protobuf, JSON, and gzip with compressed/decompressed
-  request bounds (`internal/otlphttp/read.go`).
-- gRPC has a 16 MiB default receive limit
-  (`internal/receiver/otlp/ingress.go:34,111-168`).
-- TLS, optional client certificates, and bearer authentication are wired through
-  Reef for OTLP receivers and HTTP exporters
-  (`internal/config/config.go:68-73,167-174,206-214,354-362`).
-- Traces, metrics, and logs have independent worker pipelines and each exporter
-  has an independent bounded-by-count lane
-  (`internal/pipeline/pipeline.go:35-69,109-140,223-249`).
-- Retry classification distinguishes permanent and transient HTTP failures,
-  uses jitter, and honours retry hints (`internal/exporter/backoff`).
-- An oversized trace span can be rejected before enqueue and reported through
-  OTLP partial success (`internal/app/app.go:170-210`;
-  `internal/receiver/otlp/ingress.go:304-423`).
-- Metrics and logs remain in their OTLP protobuf representation through their
-  pipelines; configured service-name and redaction processors mutate them
-  explicitly (`internal/metric`, `internal/logs`).
-- Legacy Jaeger Thrift and Zipkin trace receivers exist. The Thrift decoder has
-  extensive malformed-input tests and UDP panic containment.
-- `/healthz`, `/readyz`, and Prometheus text metrics exist when the self-observe
-  endpoint is configured (`internal/app/app.go:416-484`).
-- Config parsing rejects unknown top-level typed fields using
-  `yaml.Decoder.KnownFields(true)` (`internal/config/config.go:224-234`).
-- Baseline verification on 2026-07-18 passed `gofmt`, `go vet ./...`,
-  `go build ./...`, and `go test ./... -race -count=1`.
+- One OTLP gRPC and one OTLP HTTP ingress serve traces, metrics, and logs.
+- OTLP/HTTP supports protobuf, JSON, gzip, compressed/decompressed limits, and
+  protocol-specific responses.
+- Reef v0.3 protects OTLP, self-observation, and HTTP exporter edges with
+  fail-closed plaintext policy, TLS/mTLS, bearer auth, managed credential
+  reload, and redirect/origin containment.
+- The app implements Gyre v0.5 component lifecycle, typed readiness/status,
+  startup rollback, and context-bounded idempotent shutdown.
+- Input queues and exporter lanes are bounded by item count and configured
+  byte estimates; slow destinations have independent lanes.
+- Admission supports configured principal-to-tenant allowlists and bounded
+  item, byte, concurrency, request-rate, log, and metric limits.
+- Optional Wisp headers are strictly parsed. Process-local dedup detects
+  identical replays and payload conflicts with bounded TTL and capacity.
+- The journal format is length-delimited, checksummed, fsynced, capacity
+  bounded, versioned, and tested for interrupted tails and injected fsync
+  failures.
+- Logs and metrics remain in their OTLP protobuf representations through their
+  pipelines. Redaction covers log bodies/attributes and metric datapoints and
+  exemplars.
+- Tail sampling is bounded by trace count and a byte estimate and exposes
+  pending, eviction, and late-span metrics.
+- CI/release workflows, build metadata, deterministic packages, and a broad
+  race-tested suite exist.
+- The current Coral-to-Fathom three-signal integration gate passes.
 
-## Production blockers and risks
+## Closed stabilization work
 
-### P0 — acknowledged data can be lost
+### Gate 1 — delivery-owned journal lifecycle
 
-`admit*` returns success after `Pipeline.Enqueue` places a batch in a memory
-channel (`internal/receiver/otlp/ingress.go:306-357`). Export happens later.
-Wisp can therefore retire a durable envelope before Amber has admitted it. A
-Coral crash loses the acknowledged queue. The README's edge-durability wording
-does not close this protocol gap.
+Ingress fsyncs a canonical post-admission envelope with an internal record ID
+before enqueue. The identity survives queueing, batching, tail-sampling splits,
+redispatch generations, and exporter fan-out. Amber is required; Fathom/S3 are
+best-effort. Successful required delivery atomically reclaims only completed
+records. Transient failures are redispatched without restart; permanent and
+partial-success rejection is moved to a durable quarantine with a bounded log
+reason. A bounded receipt ledger prevents Wisp response-loss duplicates across
+restart. Startup reconciles crashes after receipt/quarantine fsync but before
+active-record removal. Pressure, retry, pending acknowledgement, and quarantine
+degrade readiness and are visible through bounded metrics.
 
-Decision: add a bounded durable handoff journal and acknowledge only after the
-journal admission contract is satisfied. Until then, Coral is at-most-once
-after its ingress acknowledgement boundary.
+The race-tested matrix covers append/ack fsync failure, capacity exhaustion,
+truncated/corrupt tails, process crash, compaction retention, interrupted
+sidecar transitions, stale dispatch completion, downstream recovery, permanent
+rejection, response loss, and graceful shutdown ordering.
 
-### P0 — authenticated principal is not yet tenant identity
+## Release blockers
 
-At the reviewed baseline, Reef v0.1.0 exposed neither the matched key name nor a
-tenant identity. The Reef v0.3 security increment now propagates the configured
-bearer key name as an authenticated principal over HTTP and gRPC. Coral's
-`Sink` and all signal batches still have no immutable organisation/project
-context, mapping policy, per-tenant quotas, queues, storage keys, or metrics.
+### P0 — stateful processing is not universally byte-bounded
 
-Authentication can now answer “which configured credential matched?”, but not
-yet “which organisation/project owns this request?”. This still blocks safe
-tenant-aware deduplication, quotas, auditing, and multi-tenant deployment.
+The re-baseline corrected `model.Span.SizeBytes` to conservatively include raw
+OTLP and scope/schema strings, so input queues, exporter lanes, and the tail
+sampler no longer ignore nested events and links. The trace batch processor,
+however, still buffers by span count and timeout without its own byte budget.
+Moving a batch out of the input queue releases that queue's reservation while
+the processor continues retaining it.
 
-### P0 — OTLP traces are silently lossy
+The stable gate requires byte accounting for every stateful buffer and
+boundary tests using maximal events, links, nested values, and shared
+resource/scope structures.
 
-OTLP traces are converted to `model.Span` on ingress and reconstructed on
-export. The model does not retain instrumentation scope/schema URL, trace state,
-flags, events, links, dropped counts, or the original scope grouping
-(`internal/receiver/otlp/convert.go:13-39`;
-`internal/exporter/amber/convert.go:20-60`). Export sets scope name to `coral`.
-This violates the requirement that field loss or normalization be explicit and
-observable, and will affect Wisp's future durable trace path.
+### P0 — finish tenant routing beyond the pipeline queue
 
-S3 is intentionally even narrower: its JSONL format retains a subset of span
-fields and only `service.name` from resource data
-(`internal/exporter/s3/exporter.go:119-153`). That format has no version marker.
+Admission now stamps immutable tenant metadata on trace spans and metric/log
+batches before queueing. The real asynchronous tail sampler keys traces by that
+metadata, including after batching and replay. Dedup and durable receipts now
+use the mapped tenant consistently. Exporters still do not propagate the
+admitted tenant downstream.
 
-### P0 — memory is not bounded in bytes
+For the next stable release, immutable routing metadata must survive every
+queue, processor, split, and fan-out lane, or multi-tenant mode must fail
+closed and remain explicitly experimental. The release must not claim tenant
+isolation that ends before downstream propagation.
 
-The pipeline queue and every exporter lane are sized only in batch count and
-default to 10,000 (`internal/pipeline/pipeline.go:19-25,63-69,109-113`).
-An OTLP request may be up to 16 MiB. Multiple signal pipelines and fan-out lanes
-multiply retained payload references. Tail sampling separately retains up to
-100,000 traces by default, also without a byte or span limit
-(`internal/processor/sampling/tail.go:61-105`).
+## High-priority correctness work
 
-This is bounded in object count but not by a safe capacity model. Queue length,
-fan-out count, payload size, and tail-sampling retention can combine into
-unacceptable memory use.
+### P1 — legacy listeners bypass the Reef edge policy
 
-### P0 — Wisp delivery identity is ignored
+Jaeger UDP/TCP/HTTP and Zipkin HTTP use endpoint-only configuration. They have
+no TLS/auth or explicit insecure policy and can bind externally. For stable
+operation they must either adopt Reef-compatible protection, be restricted to
+loopback by default with explicit risk opt-in, or be declared unsupported in
+the production profile.
 
-There is no reference to `x-wisp-envelope-id` or `x-wisp-signal-kind`. Requests
-without the headers work, which is required, but present headers are neither
-validated nor used for tenant/signal-aware bounded deduplication. Same-ID,
-different-payload conflicts cannot be detected.
+### P1 — nested typed configuration is not uniformly strict
 
-### P1 — downstream partial success is discarded
+Top-level YAML uses `KnownFields(true)`, but custom `yaml.Node` decoding for
+processors/exporters can ignore unknown nested keys. A typo in a timeout,
+limit, redaction, or TLS-adjacent field must fail startup rather than silently
+change behavior.
 
-HTTP exporters treat every status below 300 as complete success and drain the
-body without decoding an OTLP response (`internal/exporter/amber/exporter.go`;
-`internal/metric/amber.go`; `internal/logs/fathom.go:62-79`). If Amber returns
-OTLP partial success, Coral silently treats rejected items as accepted. There is
-no way to retry only rejected elements because the journal/item identity model
-does not exist yet.
+### P1 — per-destination lane metrics remain incomplete
 
-### P1 — shutdown can discard queued data
+Gate 1 added active journal bytes/records/oldest age, receipts, quarantine,
+retry/ack state, and redispatch outcomes, and connected unhealthy durable state
+to readiness. Exporter lane item/byte depth still lacks stable per-destination
+labels and remains Gate 2 work.
 
-The runtime context passed to `App.Start` is cancelled by the signal before
-`App.Shutdown` creates its 15-second context (`cmd/coral/main.go:46-59`).
-Workers and exporter lanes keep using the cancelled runtime context
-(`internal/pipeline/pipeline.go:109-140,197-249`). Queue draining can therefore
-invoke exporters with an already-cancelled context. `Shutdown` also waits on
-worker/exporter wait groups without selecting on its own deadline
-(`internal/pipeline/pipeline.go:145-183`).
+## Lower-priority and later work
 
-Stateful processor `Close` methods ignore emit errors and use
-`context.Background` (`internal/processor/batch.go:63-80`;
-`internal/processor/sampling/tail.go:212-230`), so shutdown is neither bounded
-nor reliably reported.
+- Complete item-level partial-success aggregation for logs and metrics.
+- Define versioned organisation/project identity and downstream propagation;
+  the current map is an admission policy, not a full control-plane model.
+- Add fair scheduling across tenants rather than request-local quotas only.
+- Persist or explicitly reset tail-sampling decisions across restart and
+  expose keep/drop/incomplete reasons.
+- Version or explicitly label the S3 trace format as lossy.
+- Add Gyre Reloadable only after transactional last-known-good config
+  replacement is designed.
+- Add admin/RBAC/audit APIs only when the platform needs them.
+- Design affinity/shared state before claiming horizontal durability.
 
-### P1 — observability can overstate delivery
+## Corrections landed during this re-baseline
 
-`itemsOut` increments after dispatch attempts even if every non-blocking
-exporter lane was full (`internal/pipeline/pipeline.go:223-250`). It measures
-items processed to fan-out, not items exported. The public name and comments say
-“out/exported”. Exporter drops are aggregated across destinations, preventing
-source-of-truth versus derived-destination diagnosis.
+- `Journal.Recover` now applies the configured and hard record limits before
+  allocating an on-disk length, matching the safe replay path.
+- Trace memory accounting now includes retained raw OTLP and scope/schema
+  strings, with a regression test using a multi-kilobyte raw span.
+- The Amber and Fathom trace converters now preserve separate resource/scope
+  schemas, scope attributes, trace state, flags, events, links, and dropped
+  counts while still applying normalized processor output.
+- Trace redaction now scrubs nested event and link attributes in the retained
+  raw OTLP before either downstream converter can emit them.
+- Amber and Fathom exporters now decode OTLP success responses for all signals;
+  a non-zero downstream partial-success rejection is a permanent exporter
+  failure rather than a falsely confirmed delivery. Required Amber work is
+  conservatively moved to durable quarantine.
 
-Missing required signals include request/export latency, queue depth, retry
-attempts, per-reason rejection/drop counters, partial success, storage
-failures, disk pressure, active migrations, readiness reason, and build
-metadata. Existing counters have no tenant dimension because identity is absent.
+## Verification status
 
-### P1 — admission validation is incomplete
+At the reviewed commit:
 
-- Trace size partial success exists only when a `validate` processor is
-  configured; metrics and logs have no item admission rules.
-- OTLP semantic validity (ID lengths/zero IDs, timestamp relationships, metric
-  shape) is largely delegated to protobuf decoding.
-- `x-wisp-*` headers are not validated.
-- Config validation checks broad component types but does not consistently
-  validate nested processor/exporter fields at parse time. Custom `yaml.Node`
-  decoding bypasses the top-level `KnownFields` guarantee.
-- Worker, queue, sampling, batch, timeout, endpoint, retry, and regex counts have
-  no coherent upper/lower bound policy.
-- Zipkin HTTP limits the reader to 16 MiB but does not distinguish exact
-  overflow with `413` (`internal/receiver/zipkin/http.go`).
+- vet: pass;
+- full race suite: pass;
+- config fuzz smoke: pass with writable temporary cache;
+- golangci-lint v2.12.2: zero issues with writable temporary cache;
+- deterministic Linux/amd64 package comparison: pass;
+- Coral-to-Fathom three-signal integration gate: pass;
+- live release tag: absent;
+- Gate 1 component/app crash, retry, response-loss, partial-success
+  classification, pressure, and quarantine matrix: pass;
+- real Wisp-to-Coral-to-Amber sustained soak: remains Gate 4.
 
-### P1 — tail sampling has explicit but under-observed loss boundaries
+## Release verdict
 
-Tail sampling is bounded by trace count, not bytes/spans. Eviction forces an
-early decision. Late spans use a finite decided LRU; after eviction the same
-trace can receive a new, different decision (`internal/processor/sampling/tail.go`).
-Close force-keeps all pending traces, so shutdown changes sampling semantics.
-There are no counters for forced decisions, late spans, evictions, or kept/dropped
-items.
-
-### Resolved baseline finding — lifecycle metadata, CI, and release artifacts
-
-The reviewed commit had no GitHub workflow, release script, artifact checksum,
-changelog, or build/version injection. Increment 1 added build identity,
-readiness/queue metrics, CI gates, and deterministic cross-platform archives.
-The final `main` commit
-`d99a4dbe21fd9c3562936a763e66bb9ae1dec1ee` passed GitHub Actions run
-`29625160872`.
-
-Gyre lifecycle conformance was still absent at that baseline. Increment 2 now
-tracks the direct Gyre v0.5.0 component adoption; the cross-platform contract
-split is documented in `docs/PLATFORM_COMPATIBILITY.md`.
-
-The module declares Go 1.26.3. Offline dependency enumeration succeeds, but the
-network-based available-update/retraction check could not run in the restricted
-audit environment.
-
-### P2 — operational API has weak server hardening
-
-The self-observation server has no read/header/idle timeouts and no explicit
-access-control model (`internal/app/app.go:416-436`). Readiness is one boolean,
-with no reason. Ingress HTTP has `ReadTimeout` but not explicit
-`ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`, or maximum header bytes.
-Serve-loop failures are only logged and do not transition readiness.
-
-## Tests and engineering depth
-
-There are roughly 167 test/fuzz/benchmark functions across 29 test files.
-Unit and integration coverage is strongest around config, Thrift parsing,
-pipeline lifecycle, tail sampling, and unified OTLP transport. Race tests pass.
-
-Gaps:
-
-- only config has a fuzz target; externally supplied OTLP/JSON/gzip, Zipkin,
-  Jaeger Thrift, header parsing, and future journal records need fuzzing;
-- no crash/restart recovery tests because no journal exists;
-- no disk-full, corrupt-record, short-write, downstream partial-success, or
-  retry exhaustion failure injection;
-- no byte-capacity tests across request, queue, sampler, and fan-out;
-- no multi-tenant isolation tests;
-- several timing tests use sleeps and may be flaky under load;
-- no CI currently runs any gate.
-
-## Architecture conclusion
-
-The reusable core is worth evolving; a rewrite is not justified. The generic
-pipeline, unified ingress, protocol helpers, Reef integration, and existing test
-base provide useful seams. The next work should harden those seams in small
-capability increments rather than introduce storage/query functionality into
-Coral.
-
-The accepted role and boundaries are recorded in
-`docs/adr/0001-coral-role-and-boundaries.md`. The implementation sequence and
-compatibility story are in `docs/ROADMAP.md`.
-
-## Assumptions requiring later validation
-
-- Amber can provide an unambiguous durable-admission response for each signal.
-  Its current contract and version must be checked before durable ACK semantics
-  are implemented.
-- A future platform identity source can supply stable organisation/project IDs
-  and credential mappings. Gyre v0.5.0 is explicitly not that authority; it
-  owns operational lifecycle/resource contracts, while Reef owns transport
-  security.
-- A 24-hour default Wisp deduplication TTL is likely adequate for Wisp retry and
-  restart horizons. It is a roadmap proposal, not a current contract.
-- A single-node journal is a useful first durable increment; horizontal scaling
-  may require affinity or a shared consistency layer.
+Do not tag the current commit as stable. Keep it as an unreleased development
+baseline. Gate 1 is closed; continue with Gate 2, then repeat the integration
+and release review after the remaining gates close. No version is assigned in
+advance.

@@ -123,11 +123,26 @@ func post(ctx context.Context, client *http.Client, url, who string, body []byte
 		return fmt.Errorf("%s: post: %w", who, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return backoff.StatusError(resp.StatusCode, resp.Header, who+": "+strings.TrimSpace(string(snippet)))
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return fmt.Errorf("%s: read response: %w", who, readErr)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 300 {
+		if len(responseBody) > 256 {
+			responseBody = responseBody[:256]
+		}
+		return backoff.StatusError(resp.StatusCode, resp.Header, who+": "+strings.TrimSpace(string(responseBody)))
+	}
+	var response colmetricspb.ExportMetricsServiceResponse
+	if err := proto.Unmarshal(responseBody, &response); err != nil {
+		return backoff.Permanent(fmt.Errorf("%s: invalid OTLP response: %w", who, err))
+	}
+	if partial := response.GetPartialSuccess(); partial != nil && partial.GetRejectedDataPoints() > 0 {
+		return backoff.Permanent(fmt.Errorf(
+			"%s: partial success rejected_data_points=%d: %s",
+			who, partial.GetRejectedDataPoints(), partial.GetErrorMessage(),
+		))
+	}
 	return nil
 }
 

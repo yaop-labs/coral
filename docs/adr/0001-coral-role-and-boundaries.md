@@ -7,15 +7,15 @@
 ## Context
 
 Coral currently accepts OTLP traces, metrics, and logs, plus legacy
-Jaeger/Zipkin traces. It processes data in bounded-by-count memory queues and
-fans out to Amber, Fathom, S3, or devnull. The current OTLP response is sent
-after a batch enters Coral's memory queue, before any downstream system has
-durably admitted it.
+Jaeger/Zipkin traces. It processes data in count- and estimate-bounded queues and
+fans out to Amber, Fathom, S3, or devnull. With `journal_path`, Coral now fsyncs
+the accepted post-admission envelope before enqueue and retains it until the
+required Amber destination accepts the resulting work.
 
 Wisp has a durable, at-least-once spool and Amber is intended to own durable
-telemetry storage. Those edge guarantees do not close the current handoff gap:
-after Coral acknowledges a request, Wisp may retire its envelope, while a Coral
-crash can still lose the in-memory batch.
+telemetry storage. Those edge guarantees alone did not close the handoff gap.
+Coral's journal now owns that interval with live redispatch, permanent-failure
+quarantine, bounded durable Wisp receipts, and failure-state observability.
 
 Coral also has no query API, retention engine, storage schema, organisation or
 project model, tenant propagation, or UI API. Adding all of those here would
@@ -56,8 +56,9 @@ migrations, and audit data. Any broader API requires a separate ADR.
 
 ## Consequences
 
-- The current in-memory acknowledgement is explicitly non-durable and remains a
-  production blocker until the journal increment lands.
+- Individual journal records are removed only after every required Amber
+  contribution completes, or after an atomic move to permanent-failure
+  quarantine. Safe compaction retains all unrelated active records.
 - Tenant identity must precede tenant-aware deduplication.
 - Standard OTLP clients without Wisp headers remain supported.
 - `x-wisp-envelope-id` is scoped by tenant and signal and must be backed by a
