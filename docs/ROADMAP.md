@@ -165,7 +165,9 @@ Closure evidence:
 Status: **in progress**. The first fidelity slice now has raw trace golden
 coverage, all OTLP metric-type preservation coverage, representative log
 resource/record coverage, and explicit downstream tenant-header assertions.
-The real Amber/Fathom pair and release policy gates remain open.
+A local Amber process-pair smoke now accepts traces, metrics, and logs through
+Coral; Fathom, partial-success classification through the pair, and release
+policy gates remain open.
 
 Goal: Amber receives every supported field not intentionally transformed by a
 configured processor, and Coral understands Amber's response.
@@ -190,7 +192,9 @@ Required work:
 
 Verification:
 
-- maximal trace round-trip through a real Coral-to-Amber process pair;
+- maximal trace round-trip through a real Coral-to-Amber process pair (the
+  current smoke proves admission for representative traces, metrics, and logs;
+  maximal-field assertions remain);
 - golden fixtures for every OTLP metric type and representative log bodies;
 - permanent/transient/partial downstream response matrix;
 - privacy fixture proving configured secrets do not survive in top-level or

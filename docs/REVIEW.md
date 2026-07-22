@@ -91,9 +91,11 @@ and exporter-lane metrics expose item/byte depth and stable destination labels.
 The first slice adds a raw trace golden fixture covering trace state, events,
 links, schema URLs, and dropped counts; an all-OTLP-metric-types round-trip
 fixture covering temporality, monotonicity, and exemplars; and representative
-log resource/record preservation. Real Amber/Fathom process-pair verification,
-partial-success matrix through the pair, and release-profile enforcement remain
-open.
+log resource/record preservation. A reproducible local Amber process-pair
+smoke now accepts representative traces, metrics, and logs through Coral
+(`configs/examples/gate3-amber.yaml` plus the adjacent JSON fixtures). Fathom,
+maximal-field assertions through the live pair, the partial-success matrix,
+and release-profile enforcement remain open.
 
 ## Release blockers
 

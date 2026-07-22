@@ -6,6 +6,9 @@ tested, documented increment.
 
 ## Unreleased
 
+- Gate 3: add a loopback Amber real-pair smoke configuration and OTLP JSON
+  fixtures proving trace, metric, and log admission through Coral.
+
 ### Documentation
 
 - Consolidated the 2026-07-07 platform pass, 2026-07-09/10 code review,

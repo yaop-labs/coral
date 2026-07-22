@@ -1,0 +1,1 @@
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"coral-gate3"}}]},"scopeMetrics":[{"scope":{"name":"gate3","version":"1.0"},"metrics":[{"name":"gate3.gauge","description":"real pair","unit":"1","gauge":{"dataPoints":[{"timeUnixNano":"2000000000","asDouble":42.5,"attributes":[{"key":"kind","value":{"stringValue":"gauge"}}]}]}}]}]}]}
