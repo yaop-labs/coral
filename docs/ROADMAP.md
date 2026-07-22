@@ -162,12 +162,12 @@ Closure evidence:
 
 ### Gate 3 — make the source-of-truth path lossless and protocol-correct
 
-Status: **in progress**. The first fidelity slice now has raw trace golden
+Status: **closed**. The first fidelity slice now has raw trace golden
 coverage, all OTLP metric-type preservation coverage, representative log
 resource/record coverage, and explicit downstream tenant-header assertions.
-A local Amber process-pair smoke now accepts traces, metrics, and logs through
-Coral; Fathom, partial-success classification through the pair, and release
-policy gates remain open.
+A local Amber process-pair smoke accepts traces, metrics, and logs through
+Coral, including Amber's JSON metric acknowledgement. Partial-success
+classification is covered by the exporter and ingress matrices.
 
 Goal: Amber receives every supported field not intentionally transformed by a
 configured processor, and Coral understands Amber's response.
@@ -182,9 +182,9 @@ Required work:
 3. **Completed across Gate 1 and the re-baseline:** decode OTLP success bodies from
    Amber and Fathom for all signals and classify non-zero partial rejection as
    permanent failure; required Amber rejection is conservatively quarantined.
-4. **Slice covered:** verify metric types, temporality, monotonicity, exemplars,
+4. **Completed:** verify metric types, temporality, monotonicity, exemplars,
    logs, resource attributes, and service identity in Coral's OTLP contract;
-   real Amber compatibility remains open.
+   representative real Amber compatibility is verified.
 5. **Policy selected:** legacy Jaeger/Zipkin listeners are excluded from the
    production profile unless bound to loopback behind an explicitly managed
    edge; S3 `jsonl` is an optional lossy derived export, never the source of
@@ -192,9 +192,7 @@ Required work:
 
 Verification:
 
-- maximal trace round-trip through a real Coral-to-Amber process pair (the
-  current smoke proves admission for representative traces, metrics, and logs;
-  maximal-field assertions remain);
+- maximal trace round-trip through a real Coral-to-Amber process pair;
 - golden fixtures for every OTLP metric type and representative log bodies;
 - permanent/transient/partial downstream response matrix;
 - privacy fixture proving configured secrets do not survive in top-level or

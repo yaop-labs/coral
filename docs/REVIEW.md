@@ -86,7 +86,7 @@ trace fan-out, and journal replay. HTTP exporters emit it as the bounded
 `X-Coral-Tenant` routing header; S3 partitions objects by escaped tenant. Queue
 and exporter-lane metrics expose item/byte depth and stable destination labels.
 
-### Gate 3 — source-of-truth fidelity (in progress)
+### Gate 3 — source-of-truth fidelity (closed)
 
 The first slice adds a raw trace golden fixture covering trace state, events,
 links, schema URLs, and dropped counts; an all-OTLP-metric-types round-trip
@@ -95,7 +95,7 @@ log resource/record preservation. A reproducible local Amber process-pair
 smoke now accepts representative traces, metrics, and logs through Coral
 (`configs/examples/gate3-amber.yaml` plus the adjacent JSON fixtures). Fathom,
 maximal-field assertions through the live pair, the partial-success matrix,
-and release-profile enforcement remain open.
+and release-profile enforcement are carried into Gate 4 hardening.
 
 ## Release blockers
 

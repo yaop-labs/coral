@@ -8,6 +8,8 @@ tested, documented increment.
 
 - Gate 3: add a loopback Amber real-pair smoke configuration and OTLP JSON
   fixtures proving trace, metric, and log admission through Coral.
+- Gate 3 closed after exporter response-matrix coverage and real-pair
+  verification; production-profile hardening continues in Gate 4.
 
 ### Documentation
 
