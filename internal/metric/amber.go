@@ -3,6 +3,7 @@ package metric
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,6 +136,18 @@ func post(ctx context.Context, client *http.Client, url, who string, body []byte
 			responseBody = responseBody[:256]
 		}
 		return backoff.StatusError(resp.StatusCode, resp.Header, who+": "+strings.TrimSpace(string(responseBody)))
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		var ack struct {
+			Rejected int `json:"rejected"`
+		}
+		if err := json.Unmarshal(responseBody, &ack); err != nil {
+			return backoff.Permanent(fmt.Errorf("%s: invalid JSON response: %w", who, err))
+		}
+		if ack.Rejected > 0 {
+			return backoff.Permanent(fmt.Errorf("%s: partial success rejected=%d", who, ack.Rejected))
+		}
+		return nil
 	}
 	var response colmetricspb.ExportMetricsServiceResponse
 	if err := proto.Unmarshal(responseBody, &response); err != nil {
