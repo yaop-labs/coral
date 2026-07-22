@@ -204,9 +204,10 @@ Goal: turn component correctness into a supportable release.
 
 Required work:
 
-1. Add a production example with TLS/mTLS, bearer rotation, required Amber,
-   bounded journal/queues, self-observation protection, and explicit legacy
-   listener policy.
+1. **In progress (profile added):** production example with TLS/mTLS, bearer
+   rotation, required Amber, bounded journal/queues, self-observation
+   protection, and explicit legacy listener policy is now checked by a config
+   parse test. Rotation and runtime soak evidence remain.
 2. Publish a runbook for startup, readiness, journal pressure, quarantine,
    downstream outage, credential rotation, graceful shutdown, backup/move of
    journal state, and rollback.

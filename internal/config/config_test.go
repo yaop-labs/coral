@@ -575,3 +575,13 @@ metric_pipeline:
 		t.Fatalf("exporter Reef auth config = %#v", exp.Auth)
 	}
 }
+
+func TestParse_ProductionExample(t *testing.T) {
+	doc, err := os.ReadFile("../../configs/examples/production.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(doc); err != nil {
+		t.Fatalf("production example: %v", err)
+	}
+}

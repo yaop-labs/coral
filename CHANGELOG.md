@@ -6,6 +6,9 @@ tested, documented increment.
 
 ## Unreleased
 
+- Gate 4: add a Reef-backed production profile with TLS/mTLS, bearer files,
+  bounded journal/queues, protected self-observation, and no legacy listeners.
+
 - Gate 3: add a loopback Amber real-pair smoke configuration and OTLP JSON
   fixtures proving trace, metric, and log admission through Coral.
 - Gate 3 closed after exporter response-matrix coverage and real-pair
