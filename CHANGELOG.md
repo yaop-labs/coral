@@ -12,6 +12,9 @@ tested, documented increment.
   rollback runbook.
 - Gate 4 verification: full tests, race, config fuzz, and deterministic Linux/
   amd64 packaging with checksum pass on the current commit.
+- Gate 4 soak: real Wisp→Coral→Amber traffic was exercised; the non-journal
+  harness exposed unrecoverable failures during Amber outage and is not a
+  release acceptance result.
 
 - Gate 3: add a loopback Amber real-pair smoke configuration and OTLP JSON
   fixtures proving trace, metric, and log admission through Coral.
