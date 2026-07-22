@@ -46,12 +46,11 @@ the mapped tenant, signal, normalized delivery ID, and canonical request digest.
 
 ### Tenant identity
 
-`tenant_map` is currently an ingress allowlist and quota key. It is not a
+`tenant_map` is currently an ingress allowlist and routing key. It is not a
 versioned organisation/project control plane. The mapped value is carried
-through asynchronous pipeline ownership, sampling, journal, and dedup, but is
-not yet propagated to downstream storage routing. The next stable release will
-either complete that propagation or expose only a fail-closed single-tenant
-production profile.
+through asynchronous pipeline ownership, sampling, journal, dedup, OTLP
+export headers (`X-Coral-Tenant`), and S3 object prefixes. External Amber/Fathom
+enforcement of that header is part of the Gate 3 real-pair contract.
 
 ### Durability
 

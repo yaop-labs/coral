@@ -44,6 +44,12 @@ tested, documented increment.
 
 ### Added
 
+- Closed Gate 2: trace batch buffers now enforce `max_bytes`; nested processor,
+  exporter, retry, TLS, and auth configuration typos fail validation; mapped
+  tenant identity propagates through async state to OTLP routing headers and
+  tenant-scoped S3 prefixes; queue/lane metrics expose stable destination
+  labels.
+
 - Bounded per-tenant request-rate quotas (`max_requests_per_second`) with
   tenant-isolated rejection counters; concurrency quota accounting preserves
   existing accepted/rejected totals.

@@ -50,7 +50,7 @@ func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
 		return fmt.Errorf("amber logs: marshal: %w", err)
 	}
 	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "amber logs", body)
+		return post(ctx, e.client, e.url, "amber logs", body, b.Tenant)
 	})
 }
 

@@ -56,7 +56,7 @@ func (e *AmberExporter) Export(ctx context.Context, b Batch) error {
 		return fmt.Errorf("amber metrics: marshal: %w", err)
 	}
 	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "amber metrics", body)
+		return post(ctx, e.client, e.url, "amber metrics", body, b.Tenant)
 	})
 }
 
@@ -100,7 +100,7 @@ func (e *FathomExporter) Export(ctx context.Context, b Batch) error {
 		return fmt.Errorf("fathom metrics: marshal: %w", err)
 	}
 	return e.retry.Do(ctx, func(ctx context.Context) error {
-		return post(ctx, e.client, e.url, "fathom metrics", body)
+		return post(ctx, e.client, e.url, "fathom metrics", body, b.Tenant)
 	})
 }
 
@@ -112,12 +112,15 @@ func (e *FathomExporter) Close() error {
 }
 
 // post sends one OTLP/protobuf request and classifies the outcome per §4.
-func post(ctx context.Context, client *http.Client, url, who string, body []byte) error {
+func post(ctx context.Context, client *http.Client, url, who string, body []byte, tenant string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return backoff.Permanent(fmt.Errorf("%s: request: %w", who, err))
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	if tenant != "" {
+		req.Header.Set("X-Coral-Tenant", tenant)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s: post: %w", who, err)

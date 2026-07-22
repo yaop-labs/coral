@@ -886,6 +886,10 @@ func (a *App) selfObsMux(p *pipeline.Pipeline[model.Batch]) http.Handler {
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_processor_failures_total counter")
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_failures_total counter")
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_queue_drops_total counter")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_lane_depth gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_lane_capacity gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_lane_bytes gauge")
+		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_exporter_lane_byte_capacity gauge")
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_in_progress gauge")
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_forced gauge")
 		_, _ = fmt.Fprintln(w, "# TYPE coral_pipeline_drain_duration_seconds gauge")
@@ -1017,6 +1021,14 @@ func writePipelineMetrics[T pipeline.Signal](w http.ResponseWriter, signal strin
 	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_forced{signal=%q} %d\n", signal, forced)
 	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_duration_seconds{signal=%q} %g\n", signal, drain.Duration.Seconds())
 	_, _ = fmt.Fprintf(w, "coral_pipeline_drain_outcome{signal=%q,outcome=%q} 1\n", signal, drain.Outcome)
+	for i := 0; i < p.ExporterCount(); i++ {
+		depth, capacity, bytes, byteCapacity := p.ExporterLaneDepth(i)
+		destination := fmt.Sprintf("exporter_%d", i)
+		_, _ = fmt.Fprintf(w, "coral_pipeline_exporter_lane_depth{signal=%q,destination=%q} %d\n", signal, destination, depth)
+		_, _ = fmt.Fprintf(w, "coral_pipeline_exporter_lane_capacity{signal=%q,destination=%q} %d\n", signal, destination, capacity)
+		_, _ = fmt.Fprintf(w, "coral_pipeline_exporter_lane_bytes{signal=%q,destination=%q} %d\n", signal, destination, bytes)
+		_, _ = fmt.Fprintf(w, "coral_pipeline_exporter_lane_byte_capacity{signal=%q,destination=%q} %d\n", signal, destination, byteCapacity)
+	}
 }
 
 func prometheusLabelValue(value string) string {
@@ -1097,7 +1109,7 @@ func buildProcessor(pc config.ProcessorConfig, p *pipeline.Pipeline[model.Batch]
 		}
 		return processor.NewBatch(cfg.MaxSize, cfg.Timeout.Std(), func(ctx context.Context, b model.Batch) error {
 			return p.ExportFrom(ctx, b, processorIndex+1)
-		}), nil
+		}, cfg.MaxBytes), nil
 
 	case "tail_sampling":
 		var cfg config.TailSamplingConfig

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -102,6 +103,9 @@ func (e *Exporter) objectKey(b model.Batch) string {
 	prefix := e.cfg.Prefix
 	if prefix != "" && prefix[len(prefix)-1] != '/' {
 		prefix += "/"
+	}
+	if tenant := b.DeliveryMetadata().Tenant; tenant != "" {
+		prefix += "tenant/" + url.PathEscape(tenant) + "/"
 	}
 	firstID := ""
 	if len(b.Spans) > 0 {

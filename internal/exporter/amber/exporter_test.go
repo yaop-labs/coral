@@ -31,8 +31,10 @@ func attr(kvs []*commonpb.KeyValue, key string) *commonpb.AnyValue {
 func TestAmberExporter_Export(t *testing.T) {
 	var received *coltracepb.ExportTraceServiceRequest
 	var gotPath string
+	var gotTenant string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotTenant = r.Header.Get("X-Coral-Tenant")
 		body, _ := io.ReadAll(r.Body)
 		received = &coltracepb.ExportTraceServiceRequest{}
 		if err := proto.Unmarshal(body, received); err != nil {
@@ -59,6 +61,7 @@ func TestAmberExporter_Export(t *testing.T) {
 			model.StringAttr("http.method", "GET"),
 			{Key: "http.status_code", Value: model.IntValue(200)},
 		},
+		Tenant: "tenant-a",
 	}
 	if err := exp.Export(context.Background(), model.Batch{Spans: []model.Span{s}}); err != nil {
 		t.Fatalf("Export: %v", err)
@@ -66,6 +69,9 @@ func TestAmberExporter_Export(t *testing.T) {
 
 	if gotPath != "/v1/traces" {
 		t.Errorf("path = %q, want /v1/traces", gotPath)
+	}
+	if gotTenant != "tenant-a" {
+		t.Errorf("tenant header = %q, want tenant-a", gotTenant)
 	}
 	if received == nil || len(received.ResourceSpans) != 1 {
 		t.Fatalf("expected 1 ResourceSpans, got %+v", received)

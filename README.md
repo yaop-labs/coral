@@ -38,6 +38,9 @@ Fathom, S3, and devnull are best-effort. A required-lane failure retains its
 journal record, while an optional destination cannot block Amber completion.
 When `journal_path` is enabled, every active signal pipeline must configure an
 Amber exporter; Coral rejects a best-effort-only durable configuration.
+Stateful trace batching also accepts an explicit `max_bytes` budget. Mapped
+tenant identity is propagated to OTLP exporters through `X-Coral-Tenant` and
+to S3 through tenant-scoped object prefixes.
 
 ### Tenant admission limits
 

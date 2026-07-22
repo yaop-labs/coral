@@ -110,3 +110,30 @@ func TestBatchProcessor_ProcessReturnsEmpty(t *testing.T) {
 		t.Errorf("Process should return empty batch, got %d spans", len(got.Spans))
 	}
 }
+
+func TestBatchProcessorHonorsByteBudget(t *testing.T) {
+	flushed := make(chan model.Batch, 2)
+	p := NewBatch(100, time.Minute, func(_ context.Context, b model.Batch) error {
+		flushed <- b
+		return nil
+	}, 100)
+	first := model.Span{Name: "first"}
+	second := model.Span{Name: "second"}
+	if _, err := p.Process(context.Background(), model.Batch{Spans: []model.Span{first}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, bytes, max := p.Stats(); bytes > max {
+		t.Fatalf("pending bytes=%d exceeds max=%d", bytes, max)
+	}
+	if _, err := p.Process(context.Background(), model.Batch{Spans: []model.Span{second}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-flushed:
+		if len(got.Spans) != 1 {
+			t.Fatalf("byte flush emitted %d spans, want 1", len(got.Spans))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("byte budget did not flush pending batch")
+	}
+}

@@ -754,6 +754,13 @@ func (p *Pipeline[T]) ExporterLaneDepth(index int) (depth, capacity int, bytes, 
 	return len(p.exporterLanes[index]), cap(p.exporterLanes[index]), p.exporterBytes[index].Load(), p.cfg.QueueBytes
 }
 
+// ExporterCount returns the number of configured destination lanes.
+func (p *Pipeline[T]) ExporterCount() int {
+	p.exportMu.RLock()
+	defer p.exportMu.RUnlock()
+	return len(p.exporterLanes)
+}
+
 // ExporterDrops returns batches dropped from an individual exporter lane
 // because that destination remained slower than the pipeline.
 func (p *Pipeline[T]) ExporterDrops() uint64 { return p.exporterDrops.Load() }

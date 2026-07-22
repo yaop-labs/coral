@@ -206,8 +206,9 @@ type AttributesConfig struct {
 
 // BatchConfig configures the batch processor.
 type BatchConfig struct {
-	MaxSize int      `yaml:"max_size"`
-	Timeout Duration `yaml:"timeout"`
+	MaxSize  int      `yaml:"max_size"`
+	MaxBytes int64    `yaml:"max_bytes"`
+	Timeout  Duration `yaml:"timeout"`
 }
 
 // SamplingRule configures one tail-sampling rule.
@@ -386,6 +387,18 @@ func (c *Config) Validate() error {
 			}
 			switch pc.Type {
 			case "validate", "attributes", "batch", "tail_sampling":
+				if err := validateNestedProcessor(pc.Raw, fmt.Sprintf("processors[%d]", i), pc.Type); err != nil {
+					return err
+				}
+				if pc.Type == "batch" {
+					var bc BatchConfig
+					if err := pc.Raw.Decode(&bc); err != nil {
+						return fmt.Errorf("processors[%d]: %w", i, err)
+					}
+					if bc.MaxBytes < 0 || bc.MaxBytes > (1<<40) {
+						return fmt.Errorf("processors[%d].max_bytes must be between 0 and %d", i, 1<<40)
+					}
+				}
 				if pc.Type == "tail_sampling" {
 					var tc TailSamplingConfig
 					if err := pc.Raw.Decode(&tc); err != nil {
@@ -413,6 +426,9 @@ func (c *Config) Validate() error {
 			default:
 				return fmt.Errorf("exporters[%d]: unknown type %q", i, ec.Type)
 			}
+			if err := validateNestedExporter(ec.Raw, fmt.Sprintf("exporters[%d]", i)); err != nil {
+				return err
+			}
 			if ec.Type == "amber" || ec.Type == "fathom" {
 				var edgeConfig AmberConfig
 				if err := ec.Raw.Decode(&edgeConfig); err != nil {
@@ -433,6 +449,140 @@ func (c *Config) Validate() error {
 	if logActive {
 		if err := c.LogPipeline.validate(); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func mappingNode(node yaml.Node) *yaml.Node {
+	if node.Kind == yaml.DocumentNode && len(node.Content) == 1 {
+		return mappingNode(*node.Content[0])
+	}
+	return &node
+}
+
+func validateMappingKeys(node yaml.Node, path string, allowed map[string]struct{}) error {
+	node = *mappingNode(node)
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("%s: expected mapping", path)
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("%s: unknown field %q", path, key)
+		}
+	}
+	return nil
+}
+
+func childMapping(node yaml.Node, key string) *yaml.Node {
+	node = *mappingNode(node)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func validateNestedProcessor(node yaml.Node, path string, types ...string) error {
+	if node.Kind == 0 {
+		return nil
+	}
+	allowed := map[string]struct{}{"type": {}}
+	typeNode := childMapping(node, "type")
+	processorType := ""
+	if len(types) > 0 {
+		processorType = types[0]
+	}
+	if typeNode != nil {
+		if processorType == "" {
+			processorType = typeNode.Value
+		}
+	}
+	switch processorType {
+	case "validate":
+		allowed["max_span_bytes"] = struct{}{}
+		allowed["creds_patterns"] = struct{}{}
+	case "redact":
+		allowed["creds_patterns"] = struct{}{}
+	case "attributes":
+		allowed["actions"] = struct{}{}
+	case "batch":
+		allowed["max_size"] = struct{}{}
+		allowed["max_bytes"] = struct{}{}
+		allowed["timeout"] = struct{}{}
+	case "tail_sampling":
+		allowed["decision_wait"] = struct{}{}
+		allowed["max_traces"] = struct{}{}
+		allowed["max_bytes"] = struct{}{}
+		allowed["default_keep_rate"] = struct{}{}
+		allowed["rules"] = struct{}{}
+	}
+	if err := validateMappingKeys(node, path, allowed); err != nil {
+		return err
+	}
+	if actions := childMapping(node, "actions"); actions != nil && actions.Kind == yaml.SequenceNode {
+		for i, action := range actions.Content {
+			if err := validateMappingKeys(*action, fmt.Sprintf("%s.actions[%d]", path, i), map[string]struct{}{
+				"action": {}, "scope": {}, "key": {}, "value": {}, "new_key": {},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if rules := childMapping(node, "rules"); rules != nil && rules.Kind == yaml.SequenceNode {
+		for i, rule := range rules.Content {
+			if err := validateMappingKeys(*rule, fmt.Sprintf("%s.rules[%d]", path, i), map[string]struct{}{
+				"type": {}, "threshold": {}, "services": {},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateNestedExporter(node yaml.Node, path string) error {
+	if node.Kind == 0 {
+		return nil
+	}
+	if err := validateMappingKeys(node, path, map[string]struct{}{
+		"type": {}, "endpoint": {}, "timeout": {}, "retry": {}, "tls": {}, "auth": {},
+		"insecure": {}, "danger_allow_bearer_over_plaintext": {}, "credential_reload_interval": {},
+		"bucket": {}, "region": {}, "prefix": {}, "format": {},
+	}); err != nil {
+		return err
+	}
+	if retry := childMapping(node, "retry"); retry != nil {
+		if err := validateMappingKeys(*retry, path+".retry", map[string]struct{}{
+			"max_attempts": {}, "initial_backoff": {}, "max_backoff": {},
+		}); err != nil {
+			return err
+		}
+	}
+	if tls := childMapping(node, "tls"); tls != nil {
+		if err := validateMappingKeys(*tls, path+".tls", map[string]struct{}{
+			"enabled": {}, "ca_file": {}, "cert_file": {}, "key_file": {}, "server_name": {},
+			"insecure_skip_verify": {}, "danger_accept_any": {}, "client_ca_file": {}, "min_version": {},
+		}); err != nil {
+			return err
+		}
+	}
+	if auth := childMapping(node, "auth"); auth != nil {
+		if err := validateMappingKeys(*auth, path+".auth", map[string]struct{}{
+			"token": {}, "token_file": {}, "token_env": {}, "bearer": {},
+		}); err != nil {
+			return err
+		}
+		if bearer := childMapping(*auth, "bearer"); bearer != nil && bearer.Kind == yaml.SequenceNode {
+			for i, key := range bearer.Content {
+				if err := validateMappingKeys(*key, fmt.Sprintf("%s.auth.bearer[%d]", path, i), map[string]struct{}{
+					"name": {}, "token": {}, "token_file": {}, "token_env": {},
+				}); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -462,6 +612,9 @@ func (m *MetricPipelineConfig) validate() error {
 		}
 		switch pc.Type {
 		case "attributes", "redact":
+			if err := validateNestedProcessor(pc.Raw, fmt.Sprintf("metric_pipeline.processors[%d]", i), pc.Type); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("metric_pipeline.processors[%d]: unknown type %q", i, pc.Type)
 		}
@@ -530,6 +683,9 @@ func (l *LogPipelineConfig) validate() error {
 		}
 		if pc.Type != "redact" {
 			return fmt.Errorf("log_pipeline.processors[%d]: unknown type %q", i, pc.Type)
+		}
+		if err := validateNestedProcessor(pc.Raw, fmt.Sprintf("log_pipeline.processors[%d]", i), pc.Type); err != nil {
+			return err
 		}
 	}
 	return nil

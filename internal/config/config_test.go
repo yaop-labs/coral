@@ -30,6 +30,18 @@ func TestPipelineBounds(t *testing.T) {
 	}
 }
 
+func TestBatchAndNestedConfigBounds(t *testing.T) {
+	if _, err := Parse([]byte("receivers:\n  otlp_grpc:\n    endpoint: 127.0.0.1:4317\nexporters:\n  - type: devnull\nprocessors:\n  - type: batch\n    max_bytes: -1\n")); err == nil {
+		t.Fatal("accepted negative batch max_bytes")
+	}
+	if _, err := Parse([]byte("receivers:\n  otlp_grpc:\n    endpoint: 127.0.0.1:4317\nexporters:\n  - type: devnull\nprocessors:\n  - type: batch\n    max_btyes: 1024\n")); err == nil {
+		t.Fatal("accepted unknown nested batch field")
+	}
+	if _, err := Parse([]byte("receivers:\n  otlp_grpc:\n    endpoint: 127.0.0.1:4317\nexporters:\n  - type: amber\n    endpoint: http://amber:4318\n    retry:\n      max_atempts: 3\n")); err == nil {
+		t.Fatal("accepted unknown nested exporter field")
+	}
+}
+
 func TestJournalBounds(t *testing.T) {
 	if _, err := Parse([]byte("journal_max_bytes: -1\n")); err == nil {
 		t.Fatal("accepted negative journal budget")

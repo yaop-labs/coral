@@ -3,7 +3,7 @@
 Review date: 2026-07-22
 
 Reviewed baseline: `f0868e1994c818e098afd0161401856f970c38a0` on `main`.
-Gate 1 closure below also covers the current uncommitted working tree.
+Gate 1 and Gate 2 closure below cover the current working tree.
 
 Target: stable single-node Coral with a version chosen from the completed
 capability and compatibility impact, not assigned in advance
@@ -20,8 +20,8 @@ owns the single-node handoff from an acknowledged OTLP admission through
 required Amber acceptance or durable quarantine. It performs bounded live
 redispatch, persists response-loss receipts, reconciles interrupted state
 transitions, and reports pressure/failure through readiness and metrics. The
-remaining release blockers are exact stateful bounds/routing, real Amber
-fidelity proof, legacy listener policy, and the operational release gate.
+remaining release blockers are real Amber fidelity proof, legacy listener
+policy, and the operational release gate.
 
 The current stabilization scope is single-node production operation. Horizontal
 scale, a control-plane API, and a full organisation/project model remain later
@@ -75,33 +75,18 @@ truncated/corrupt tails, process crash, compaction retention, interrupted
 sidecar transitions, stale dispatch completion, downstream recovery, permanent
 rejection, response loss, and graceful shutdown ordering.
 
+### Gate 2 — exact bounds and routing
+
+The trace batch processor now bounds retained spans by count and bytes,
+including direct pass-through for an individual item larger than the buffer
+budget. Nested processor/exporter configuration is type-aware and rejects
+unknown fields, including actions, sampling rules, retry, TLS, and auth blocks.
+Mapped tenant identity survives queueing, batching, sampling, metrics, logs,
+trace fan-out, and journal replay. HTTP exporters emit it as the bounded
+`X-Coral-Tenant` routing header; S3 partitions objects by escaped tenant. Queue
+and exporter-lane metrics expose item/byte depth and stable destination labels.
+
 ## Release blockers
-
-### P0 — stateful processing is not universally byte-bounded
-
-The re-baseline corrected `model.Span.SizeBytes` to conservatively include raw
-OTLP and scope/schema strings, so input queues, exporter lanes, and the tail
-sampler no longer ignore nested events and links. The trace batch processor,
-however, still buffers by span count and timeout without its own byte budget.
-Moving a batch out of the input queue releases that queue's reservation while
-the processor continues retaining it.
-
-The stable gate requires byte accounting for every stateful buffer and
-boundary tests using maximal events, links, nested values, and shared
-resource/scope structures.
-
-### P0 — finish tenant routing beyond the pipeline queue
-
-Admission now stamps immutable tenant metadata on trace spans and metric/log
-batches before queueing. The real asynchronous tail sampler keys traces by that
-metadata, including after batching and replay. Dedup and durable receipts now
-use the mapped tenant consistently. Exporters still do not propagate the
-admitted tenant downstream.
-
-For the next stable release, immutable routing metadata must survive every
-queue, processor, split, and fan-out lane, or multi-tenant mode must fail
-closed and remain explicitly experimental. The release must not claim tenant
-isolation that ends before downstream propagation.
 
 ## High-priority correctness work
 
@@ -113,25 +98,11 @@ operation they must either adopt Reef-compatible protection, be restricted to
 loopback by default with explicit risk opt-in, or be declared unsupported in
 the production profile.
 
-### P1 — nested typed configuration is not uniformly strict
-
-Top-level YAML uses `KnownFields(true)`, but custom `yaml.Node` decoding for
-processors/exporters can ignore unknown nested keys. A typo in a timeout,
-limit, redaction, or TLS-adjacent field must fail startup rather than silently
-change behavior.
-
-### P1 — per-destination lane metrics remain incomplete
-
-Gate 1 added active journal bytes/records/oldest age, receipts, quarantine,
-retry/ack state, and redispatch outcomes, and connected unhealthy durable state
-to readiness. Exporter lane item/byte depth still lacks stable per-destination
-labels and remains Gate 2 work.
-
 ## Lower-priority and later work
 
 - Complete item-level partial-success aggregation for logs and metrics.
-- Define versioned organisation/project identity and downstream propagation;
-  the current map is an admission policy, not a full control-plane model.
+- Define versioned organisation/project identity; the current map is a routing
+  contract, not a full control-plane model.
 - Add fair scheduling across tenants rather than request-local quotas only.
 - Persist or explicitly reset tail-sampling decisions across restart and
   expose keep/drop/incomplete reasons.
@@ -170,11 +141,12 @@ At the reviewed commit:
 - live release tag: absent;
 - Gate 1 component/app crash, retry, response-loss, partial-success
   classification, pressure, and quarantine matrix: pass;
+- Gate 2 byte-boundary, nested-config, routing-header, lane-metrics, and
+  multi-signal integration matrix: pass;
 - real Wisp-to-Coral-to-Amber sustained soak: remains Gate 4.
 
 ## Release verdict
 
 Do not tag the current commit as stable. Keep it as an unreleased development
-baseline. Gate 1 is closed; continue with Gate 2, then repeat the integration
-and release review after the remaining gates close. No version is assigned in
-advance.
+baseline. Gates 1 and 2 are closed; continue with Gate 3 fidelity and then the
+operational release gate. No version is assigned in advance.

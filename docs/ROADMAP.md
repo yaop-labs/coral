@@ -32,9 +32,9 @@ or a requirement to match Wisp feature-for-feature.
 | Reef v0.3 OTLP/export edges | Complete | production policy on OTLP, self-observation, and HTTP exporters |
 | Legacy Jaeger/Zipkin security | Open | exclude from production profile or protect explicitly |
 | Pipeline drain and fan-out isolation | Complete | bounded lanes and truthful aggregate outcomes |
-| Exact memory bounds | Partial | queues/lanes/sampler count raw trace OTLP; the trace batch processor still lacks a byte budget |
+| Exact memory bounds | Complete for Gate 2 | queues, lanes, sampler, and trace batch processor account retained bytes |
 | Trace fidelity | Partial | Coral converters preserve maximal spans; a real Amber round-trip gate remains |
-| Tenant admission quotas | Partial end-to-end | immutable tenant metadata now crosses queues and trace state; downstream propagation and key unification remain |
+| Tenant admission quotas | Complete for Gate 2 | mapped tenant identity crosses async state, dedup, journal, downstream HTTP headers, and S3 partitioning |
 | Wisp delivery identity | Complete for Gate 1 | canonical live dedup plus bounded durable response-loss receipts use the mapped tenant/signal identity |
 | Durable handoff journal | Gate 1 complete | append-before-ack, required-Amber completion, live redispatch, receipts, quarantine, atomic reclaim, and pressure readiness are implemented |
 | Logs admission | Partial | bounds/redaction work; item partial success and Amber contract remain |
@@ -113,6 +113,11 @@ Closure evidence:
 
 ### Gate 2 — make bounds and routing exact
 
+Status: **closed on 2026-07-22**. Mapped tenant metadata is preserved through
+async state and emitted to OTLP downstreams as `X-Coral-Tenant`; S3 uses a
+tenant-scoped object prefix. External Amber/Fathom enforcement of that routing
+contract remains part of Gate 3 real-pair verification.
+
 Goal: configured memory/disk/tenant limits describe retained state rather than
 only a convenient subset of it.
 
@@ -122,18 +127,19 @@ Required work:
    conservative trace accounting used by queues, lanes, and the sampler.
 2. **Completed in the re-baseline:** apply pre-allocation record limits to
    both journal Replay and Recover.
-3. Add byte budgets to stateful processor buffers so dequeueing does not make
-   retained memory disappear from accounting.
-4. Preserve immutable routing metadata across the input queue, processors,
+3. **Completed:** add byte budgets to stateful processor buffers so dequeueing
+   does not make retained memory disappear from accounting.
+4. **Completed:** preserve immutable routing metadata across the input queue,
    stateful splits/flushes, and exporter lanes.
-5. Use the same tenant/routing key for quota, dedup, journal, sampling, metrics,
-   and downstream propagation.
-6. Decide the next stable release's tenancy promise. Either finish end-to-end
-   tenant routing or ship a fail-closed single-tenant production profile and
-   mark configured multi-tenancy experimental.
-7. Reject unknown nested processor/exporter configuration fields.
-8. Expose queue and exporter-lane item/byte depth and capacity with stable
-   destination identifiers.
+5. **Completed:** use the same mapped tenant/routing key for quota, dedup,
+   journal, sampling, metrics, and downstream propagation.
+6. **Decided:** mapped multi-tenant routing is an explicit Coral contract;
+   external downstream enforcement is verified in Gate 3; single-tenant
+   deployment remains the recommended fail-closed production profile until
+   that real-pair verification is complete.
+7. **Completed:** reject unknown nested processor/exporter configuration fields.
+8. **Completed:** expose queue and exporter-lane item/byte depth and capacity
+   with stable destination identifiers.
 
 Verification:
 
@@ -143,6 +149,16 @@ Verification:
 - config typo/fuzz matrix and decompression/record-allocation attacks;
 - bounded high-load tests proving no queue, sampler, dedup map, rate window, or
   journal grows beyond its declared limit.
+
+Closure evidence:
+
+- trace batch buffering has a configured `max_bytes` budget and passes a
+  boundary test including oversized individual spans;
+- processor/exporter nested typo fixtures fail configuration parsing;
+- downstream OTLP requests carry `X-Coral-Tenant`, while S3 objects are
+  partitioned under `tenant/<mapped-tenant>/`;
+- queue and exporter-lane Prometheus metrics expose stable `destination` labels;
+- the full race suite, integration suite, and config fuzz matrix pass.
 
 ### Gate 3 — make the source-of-truth path lossless and protocol-correct
 

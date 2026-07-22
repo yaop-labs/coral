@@ -64,6 +64,9 @@ func (e *Exporter) Export(ctx context.Context, b model.Batch) error {
 		return backoff.Permanent(fmt.Errorf("amber: request: %w", err))
 	}
 	httpReq.Header.Set("Content-Type", "application/x-protobuf")
+	if tenant := b.DeliveryMetadata().Tenant; tenant != "" {
+		httpReq.Header.Set("X-Coral-Tenant", tenant)
+	}
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
