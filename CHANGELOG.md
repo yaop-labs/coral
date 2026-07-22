@@ -10,6 +10,8 @@ tested, documented increment.
   bounded journal/queues, protected self-observation, and no legacy listeners.
 - Gate 4: add the production startup, outage, rotation, shutdown, backup, and
   rollback runbook.
+- Gate 4 verification: full tests, race, config fuzz, and deterministic Linux/
+  amd64 packaging with checksum pass on the current commit.
 
 - Gate 3: add a loopback Amber real-pair smoke configuration and OTLP JSON
   fixtures proving trace, metric, and log admission through Coral.

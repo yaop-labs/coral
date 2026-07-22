@@ -214,11 +214,13 @@ Required work:
    `docs/RUNBOOK.md`; executable soak evidence remains.
 3. Add real current-Wisp → Coral → Amber and Coral → Fathom gates. Preserve the
    existing successful three-signal Coral-to-Fathom gate.
-4. Run race, lint, fuzz, deterministic package, crash matrix, and a sustained
-   outage/recovery soak on the exact release commit.
+4. **Verified so far:** full tests, race suite, config fuzz (222,220 execs),
+   deterministic Linux/amd64 package, and SHA-256 checksum pass on the current
+   commit. Lint is blocked by the local golangci-lint context-loading issue;
+   crash matrix and sustained outage/recovery soak remain.
 5. Reconcile README, compatibility matrix, example configs, changelog, and
    build metadata. `Unreleased` must describe the actual increment.
-6. Choose the version from the delivered compatibility and migration impact,
+6. **Pending release decision:** choose the version from the delivered compatibility and migration impact,
    build all release targets, verify checksums, tag the reviewed commit, and
    verify the tag workflow and published artifacts.
 
