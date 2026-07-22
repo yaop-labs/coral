@@ -217,7 +217,8 @@ Required work:
 4. **Verified so far:** full tests, race suite, config fuzz (222,220 execs),
    deterministic Linux/amd64 package, and SHA-256 checksum pass on the current
    commit. Lint is blocked by the local golangci-lint context-loading issue;
-   crash matrix and sustained outage/recovery soak remain.
+   journal crash/replay matrix passes; a sustained outage/recovery soak and
+   external Wisp/Fathom process-pair gates remain.
 5. Reconcile README, compatibility matrix, example configs, changelog, and
    build metadata. `Unreleased` must describe the actual increment.
 6. **Pending release decision:** choose the version from the delivered compatibility and migration impact,
